@@ -219,8 +219,53 @@ function defaults(){
     fundTx:[],expenses:[],incomes:[],trips:[],oblPaid:[],cycles:[]};
 }
 let D=load();
-function load(){try{const r=localStorage.getItem(KEY);if(r){const o=JSON.parse(r);if(o&&o.v===3)return fix(o);}}catch(e){}return defaults();}
-function fix(o){const d=defaults();((o.settings||{}).obligations||[]).forEach(x=>{if(!x.id)x.id="o_"+uid();});o.settings=Object.assign(d.settings,o.settings||{});o.settings.home=Object.assign(d.settings.home,(o.settings&&o.settings.home)||{});o.settings.zakat=Object.assign(d.settings.zakat,(o.settings&&o.settings.zakat)||{});o.settings.bonus=Object.assign(d.settings.bonus,(o.settings&&o.settings.bonus)||{});["categories","funds","fundTx","expenses","incomes","trips","oblPaid","cycles"].forEach(k=>{if(!Array.isArray(o[k]))o[k]=d[k];});return o;}
+function load(){try{const r=localStorage.getItem(KEY);if(r){const o=JSON.parse(r);if(o&&o.v===3){const fx=fix(o);try{localStorage.setItem(KEY,JSON.stringify(fx));}catch(e){}return fx;}}}catch(e){}return defaults();}
+function fix(o){
+  const d=defaults();
+  ((o.settings||{}).obligations||[]).forEach(x=>{if(!x.id)x.id="o_"+uid();});
+  o.settings=Object.assign(d.settings,o.settings||{});
+  o.settings.home=Object.assign(d.settings.home,(o.settings&&o.settings.home)||{});
+  o.settings.zakat=Object.assign(d.settings.zakat,(o.settings&&o.settings.zakat)||{});
+  o.settings.bonus=Object.assign(d.settings.bonus,(o.settings&&o.settings.bonus)||{});
+  ["categories","funds","fundTx","expenses","incomes","trips","oblPaid","cycles"].forEach(k=>{if(!Array.isArray(o[k]))o[k]=d[k];});
+  const t=todayISO();
+  const fut=o.cycles.filter(c=>c&&c.date>t);
+  if(fut.length){
+    fut.forEach(fc=>{
+      if(!(+o.settings.salary)&&+fc.salary>0)o.settings.salary=+fc.salary;
+      if(!o.settings.nextPay||fc.date>o.settings.nextPay)o.settings.nextPay=fc.date;
+    });
+    const rem=o.cycles.filter(c=>c&&c.date<=t);
+    fut.forEach(fc=>{
+      if(!rem.length){o.oblPaid.forEach(x=>{if(x.cy===fc.id)x.cy="virtual";});}
+      else{const prev=rem[rem.length-1];o.oblPaid.forEach(x=>{if(x.cy===fc.id)x.cy=prev.id;});}
+    });
+    o.cycles=rem;
+  }
+  if(o.settings.startDate&&o.settings.startDate>t){
+    if(!o.settings.nextPay)o.settings.nextPay=o.settings.startDate;
+    o.settings.startDate="";
+  }
+  if(!(+o.settings.salary)){
+    const cSal=o.cycles.slice().reverse().find(c=>+c.salary>0);
+    if(cSal)o.settings.salary=+cSal.salary;
+    else{
+      try{
+        const hr=JSON.parse(localStorage.getItem("edkhari.hist")||"{}");
+        const snaps=[].concat(hr.r||[],hr.u||[]).reverse();
+        for(const s of snaps){
+          const so=typeof s.snap==="string"?JSON.parse(s.snap):null;
+          if(so){
+            if(+((so.settings||{}).salary)>0){o.settings.salary=+so.settings.salary;break;}
+            const sc=(so.cycles||[]).slice().reverse().find(c=>+c.salary>0);
+            if(sc){o.settings.salary=+sc.salary;break;}
+          }
+        }
+      }catch(e){}
+    }
+  }
+  return o;
+}
 const UIK="edkhari.ui";function uiGet(k,d){try{const o=JSON.parse(localStorage.getItem(UIK)||"{}");return k in o?o[k]:d;}catch(e){return d;}}
 function uiSet(k,v){try{const o=JSON.parse(localStorage.getItem(UIK)||"{}");o[k]=v;localStorage.setItem(UIK,JSON.stringify(o));}catch(e){}}
 
@@ -248,6 +293,7 @@ function diffLabel(a,b){
 function dataSteps(){
   const st=[];
   D.cycles.forEach(c=>st.push({ts:tsFromId(c.id),date:c.date,kind:"cycle",id:c.id,title:"استلام راتب شهر "+ymLabel(c.ym),sub:"بتاريخ "+dLabel(c.date),amt:fmt(c.salary)+" ريال",col:"var(--green)",undo:()=>{
+    if(!(+D.settings.salary)&&+c.salary>0)D.settings.salary=+c.salary;
     const rem=D.cycles.filter(x=>x.id!==c.id);
     if(!rem.length){D.oblPaid.forEach(x=>{if(x.cy===c.id)x.cy="virtual";});}
     else{const prev=rem[rem.length-1];D.oblPaid.forEach(x=>{if(x.cy===c.id)x.cy=prev.id;});}
@@ -327,11 +373,16 @@ const catColor=id=>(catById(id)||{color:"#adb5bd"}).color;
 const catName=id=>id?((catById(id)||{name:"فئة محذوفة"}).name):"بدون فئة";
 const tripCat=id=>TRIPCATS.find(c=>c.id===id)||TRIPCATS[4];
 
-function salaryFor(){return +D.settings.salary||0;}
+function salaryFor(){
+  if(+D.settings.salary>0)return +D.settings.salary;
+  const c=D.cycles.slice().reverse().find(x=>+x.salary>0);
+  if(c){D.settings.salary=+c.salary;return +c.salary;}
+  return 0;
+}
 function cycleList(){
   const cs=D.cycles.slice().sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:0);
   if(!cs.length){
-    const sd=D.settings.startDate;
+    const sd=D.settings.startDate&&D.settings.startDate<=todayISO()?D.settings.startDate:"";
     if(sd)return [{id:"virtual",ym:D.settings.startYm||sd.slice(0,7),date:sd,salary:salaryFor(),virtual:true}];
     const ds=[];
     D.expenses.forEach(e=>{if(e.date)ds.push(e.date);});
@@ -346,7 +397,7 @@ function cycleList(){
   }
   return cs;
 }
-function curIdx(cs){const t=todayISO();let i=0;cs.forEach((c,k)=>{if(c.date<=t)i=k;});return i;}
+function curIdx(cs){const t=todayISO();let i=cs.length-1;cs.forEach((c,k)=>{if(c.date<=t)i=k;});return i;}
 function rangeOf(cs,i){return [cs[i].date,i+1<cs.length?cs[i+1].date:"9999-12-31"];}
 const inR=(d,r)=>d>=r[0]&&d<r[1];
 const dayBefore=iso=>{const d=new Date(iso+"T12:00:00");d.setDate(d.getDate()-1);return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate());};
@@ -468,6 +519,7 @@ function renderHome(){
   h+='<div class="scrollx noprint" style="margin-bottom:6px">'+
     '<button class="chip" type="button" data-act="undo"'+(canUndo?'':' disabled style="opacity:.4"')+'>↶ تراجع خطوة</button>'+
     (canRedo?'<button class="chip" type="button" data-act="redo">↷ إعادة خطوة</button>':'')+
+    '<button class="chip" type="button" data-act="nextpay">موعد الراتب القادم (الصرف اليومي)</button>'+
     '<button class="chip" type="button" data-act="hist">سجل الخطوات والتراجع</button>'+
     '<button class="chip" type="button" data-act="dates">تحديد التواريخ والراتب</button>'+
     '<button class="chip" type="button" data-act="custhome">تخصيص الواجهة</button>'+
@@ -477,8 +529,14 @@ function renderHome(){
   }
   if(isCur){
     const nym=c.virtual?c.ym:ymAdd(c.ym,1);
-    h+='<div class="btns" style="margin-bottom:4px"><button class="btn g" type="button" data-act="salary">تم استلام راتب شهر '+ymLabel(nym)+'</button>'+(!c.virtual?'<button class="btn r" type="button" data-act="undocycle" data-id="'+c.id+'" style="background:var(--redSoft)">إلغاء استلام راتب '+ymLabel(c.ym)+'</button>':'')+'</div>';
-    if(c.virtual)h+='<p class="gf" style="margin-bottom:8px">لم يُسجّل استلام الراتب بعد. يمكنك تحديد تاريخ بداية الحسبة وموعد الراتب القادم يدوياً من «تحديد التواريخ والراتب».</p>';
+    const np=D.settings.nextPay,t=todayISO();
+    if(np&&np<=t){
+      const salAmt=salaryFor(),obAmt=oblTotal();
+      h+='<div class="alert g" style="background:var(--greenSoft);color:var(--ink);border:1.5px solid var(--green);margin-top:4px;margin-bottom:10px"><b style="color:var(--green);font-size:16px">هل تم استلام راتب شهر '+ymLabel(nym)+'؟</b><p style="color:var(--ink2);margin-top:4px">حلّ التاريخ المحدد (<b>'+dLabel(np)+'</b>). لن يُضاف الراتب تلقائياً إلا بتأكيدك أنت: إذا ضغطت «نعم» سيُضاف الراتب (<b class="n">'+fmt(salAmt)+'</b> ريال) مع خصم المصروفات الثابتة (<b class="n">'+fmt(obAmt)+'</b> ريال).</p><div class="btns"><button class="btn g sm" type="button" data-act="salary">نعم، تم استلام الراتب</button><button class="btn sm" type="button" data-act="nextpay">لا، تعديل تاريخ الراتب القادم</button></div></div>';
+    }
+    h+='<div class="btns" style="margin-bottom:4px"><button class="btn b" type="button" data-act="nextpay">تحديد موعد الراتب القادم</button><button class="btn g" type="button" data-act="salary">استلام راتب شهر '+ymLabel(nym)+'</button></div>';
+    if(!c.virtual)h+='<button class="btn r sm full" type="button" data-act="undocycle" data-id="'+c.id+'" style="background:var(--redSoft);margin-bottom:6px">إلغاء استلام راتب '+ymLabel(c.ym)+' (الرجوع للخطوة السابقة)</button>';
+    if(c.virtual)h+='<p class="gf" style="margin-bottom:8px">لحساب كم تصرف يومياً اضغط «تحديد موعد الراتب القادم»، وعند نزول الراتب فعلياً اضغط «استلام راتب شهر '+ymLabel(nym)+'».</p>';
   }
   if(!(+D.settings.salary))h+='<div class="alert t"><b>ابدأ من هنا</b><p>أدخل راتبك والتزاماتك من الإعدادات، وأضف صناديق الادخار من صفحة الادخار.</p><div class="btns"><a class="btn b sm" href="#setup">الإعدادات</a><button class="btn sm" type="button" data-act="import">استرجاع نسخة احتياطية</button></div></div>';
   if(homeIdx===0){
@@ -501,18 +559,20 @@ function renderHome(){
   Object.keys(md.byCat).sort((a,b)=>md.byCat[b]-md.byCat[a]).forEach(k=>{const L=catLabelKey(k);parts.push({n:L.name,v:md.byCat[k],c:L.color});});
   if(md.remain-md.oblDue>0)parts.push({n:"المتبقي",v:md.remain-md.oblDue,c:"var(--fill)"});
   h+='<div class="donutwrap">'+donut(parts)+'<div class="leg">'+parts.filter(p=>p.v>0).slice(0,8).map(p=>'<div><i class="dot" style="background:'+p.c+';'+(p.c==="var(--fill)"?'border:1px solid var(--sep)':'')+'"></i><span class="l">'+esc(p.n)+'</span><b>'+fmt(p.v)+'</b></div>').join("")+'</div></div></div>';
-  if(isCur&&md.salary&&hp.showDaily!==false){
-    const t=todayISO();const np=D.settings.nextPay;const hasNext=!!(np&&np>t);
+  if(hp.showDaily!==false){
+    const t=todayISO();const np=D.settings.nextPay;const hasNext=!!(np&&np>t);const dueNow=!!(np&&np<=t);
     const todayExp=md.exp.filter(e=>e.date===t).reduce((a,e)=>a+(+e.amount||0),0);
     const avail=md.remain-md.oblDue;
     if(hasNext){
       const daysLeft=Math.max(1,daysBetween(t,np));
       const per=avail>0?avail/daysLeft:0;
-      h+='<div class="hero" style="margin-top:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="cap">مسموح لك تصرف يومياً لين الراتب</div><button type="button" data-act="dates" style="border:0;background:none;color:var(--green);font:inherit;font-size:13.5px;font-weight:600;padding:0;cursor:pointer">تعديل الموعد</button></div><div><span class="big n '+(avail<=0?'neg':'pos')+'" style="font-size:38px">'+fmt(per)+'</span><span class="cur">ريال</span></div>'+
-        '<div class="cap">صرفت اليوم <b class="n">'+fmt(todayExp)+'</b> · باقي <b class="n">'+daysLeft+'</b> يوم على موعد الراتب القادم ('+dLabel(np)+')</div>'+
-        (avail<=0?'<div class="cap" style="margin-top:4px;color:var(--red)">صرفت كل المتبقي من هذا الراتب.</div>':'<div class="cap" style="margin-top:4px">محسوب حسب التاريخ الذي حددته أنت ('+dLabel(np)+').</div>')+'</div>';
+      h+='<div class="hero" style="margin-top:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="cap">مسموح لك تصرف يومياً لين الراتب</div><button type="button" data-act="nextpay" style="border:0;background:none;color:var(--green);font:inherit;font-size:13.5px;font-weight:700;padding:0;cursor:pointer">تعديل موعد الراتب القادم</button></div><div><span class="big n '+(avail<=0?'neg':'pos')+'" style="font-size:38px">'+fmt(per)+'</span><span class="cur">ريال / يوم</span></div>'+
+        '<div class="cap">صرفت اليوم <b class="n">'+fmt(todayExp)+'</b> ريال · باقي <b class="n">'+daysLeft+'</b> يوم على موعد الراتب القادم (<b>'+dLabel(np)+'</b>)</div>'+
+        (avail<=0?'<div class="cap" style="margin-top:4px;color:var(--red)">صرفت كل المتبقي من هذا الراتب.</div>':'<div class="cap" style="margin-top:4px">محسوب بقسمة المتبقي (<b class="n">'+fmt(avail)+'</b> ريال) على <b class="n">'+daysLeft+'</b> يوم (بدون إضافة الراتب القادم).</div>')+'</div>';
     }else{
-      h+='<div class="hero" style="margin-top:12px"><div class="cap">مسموح لك تصرف يومياً لين الراتب</div><p style="margin:6px 0 10px;font-size:14px;color:var(--ink2)">صرفت اليوم <b class="n">'+fmt(todayExp)+'</b> ريال · حدد متى تستلم راتب الشهر القادم يدوياً عشان ينحسب لك الصرف اليومي والأيام المتبقية (بدون احتساب تلقائي).</p><button class="btn b sm full" type="button" data-act="dates">تحديد تاريخ استلام الراتب القادم</button></div>';
+      h+='<div class="hero" style="margin-top:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="cap">مسموح لك تصرف يومياً لين الراتب</div><button type="button" data-act="nextpay" style="border:0;background:none;color:var(--green);font:inherit;font-size:13.5px;font-weight:700;padding:0;cursor:pointer">تحديد التاريخ</button></div>'+
+        '<p style="margin:6px 0 10px;font-size:14px;color:var(--ink2)">صرفت اليوم <b class="n">'+fmt(todayExp)+'</b> ريال · '+(dueNow?'التاريخ المحدد للراتب القادم ('+dLabel(np)+') قد حلّ. حدد تاريخاً قادماً جديداً لحساب الصرف اليومي أو أكّد استلام الراتب بالأعلى.':'حدد تاريخ استلام الراتب القادم ليحسب لك كم مسموح تصرف يومياً من المتبقي الحالي (<b class="n">'+sgn(avail)+'</b> ريال) دون أن يُضاف الراتب الآن.')+'</p>'+
+        '<button class="btn b sm full" type="button" data-act="nextpay">تحديد تاريخ استلام الراتب القادم (لحساب الصرف اليومي)</button></div>';
     }
   }
   if(hp.showObl!==false&&(md.obItems.length||md.paidL.length)){
@@ -759,7 +819,10 @@ function renderSetup(){
 function nf(id,label,val,step,path,money){return '<div class="fld"><label for="'+id+'">'+label+'</label><input id="'+id+'"'+(money?MI+'value="'+fmtIn(val)+'"':' type="number" inputmode="decimal" step="'+step+'" value="'+(val==null?"":val)+'"')+' data-set="'+(path||id)+'"></div>';}
 
 function liveSetup(){const n=$("nisabVal");if(n)n.textContent=fmt((+D.settings.zakat.goldPrice||0)*(+D.settings.zakat.nisabGrams||0));const o=$("oblTot");if(o)o.textContent=fmt(oblTotal());}
-function setPath(path,val){const p=path.split(".");let o=D.settings;for(let i=0;i<p.length-1;i++)o=o[p[i]];o[p[p.length-1]]=val;}
+function setPath(path,val){
+  if(path==="startDate"&&val&&val>todayISO()){D.settings.nextPay=val;return;}
+  const p=path.split(".");let o=D.settings;for(let i=0;i<p.length-1;i++)o=o[p[i]];o[p[p.length-1]]=val;
+}
 document.addEventListener("input",e=>{const t=e.target;if(t.classList&&t.classList.contains("money")){const d=toLat(t.value).replace(/[^0-9]/g,"").replace(/^0+(?=[0-9])/,"");t.value=d?(+d).toLocaleString("en-US"):"";}},true);
 document.addEventListener("change",e=>{const t=e.target;if(t.tagName==="SELECT"&&t.dataset.list){t.dispatchEvent(new Event("input",{bubbles:true}));}});
 document.addEventListener("input",e=>{
@@ -934,48 +997,153 @@ function fundSheet(f){
 }
 
 function removeCycleById(cid){
+  const target=D.cycles.find(x=>x.id===cid);
+  if(target&&!(+D.settings.salary)&&+target.salary>0)D.settings.salary=+target.salary;
   const rem=D.cycles.filter(x=>x.id!==cid);
   if(!rem.length){D.oblPaid.forEach(x=>{if(x.cy===cid)x.cy="virtual";});}
   else{const prev=rem[rem.length-1];D.oblPaid.forEach(x=>{if(x.cy===cid)x.cy=prev.id;});}
   D.cycles=rem;homeIdx=null;spendIdx=null;
 }
 
+function nextPaySheet(){
+  const cs=cycleList();const ci=curIdx(cs);const cur=cs[ci];const md=cycleData(cs,ci);
+  const avail=md.remain-md.oblDue;const t=todayISO();
+  let h=shead("موعد الراتب القادم (الصرف اليومي)","حفظ");
+  h+='<div class="alert t" style="margin-top:0;margin-bottom:12px"><b>لحساب «مسموح لك تصرف يومياً لين الراتب» فقط</b><p>ضع هنا تاريخ استلام الراتب القادم ليحسب لك التطبيق كم تصرف يومياً من المتبقي الحالي. <b>لن يتم إضافة الراتب الجديد الآن</b> ولن يتحول للشهر الجديد تلقائياً.</p></div>';
+  h+='<div class="group"><div class="fld"><label for="np_date">تاريخ استلام الراتب القادم</label><input id="np_date" type="date" value="'+esc(D.settings.nextPay||"")+'"></div>'+
+    '<button class="add" type="button" data-x="clr" style="color:var(--red)">مسح التاريخ (إيقاف حساب الصرف اليومي)</button></div>';
+  h+='<div class="hero" id="np_preview" style="margin-top:12px"></div>';
+  if(!cur.virtual){
+    h+='<div class="alert r" style="margin-top:12px"><b>هل سجّلت استلام راتب '+ymLabel(cur.ym)+' بالخطأ؟</b><p>إذا كنت تقصد وضع تاريخ الراتب القادم فقط ولم تستلم الراتب بعد، اضغط الزر التالي لإلغاء استلام الراتب فوراً مع حفظ التاريخ لحساب الصرف اليومي:</p><div class="btns"><button class="btn rf sm" type="button" data-x="fixmistake">إلغاء استلام راتب '+ymLabel(cur.ym)+' وحفظ التاريخ للصرف اليومي</button></div></div>';
+  }
+  h+='<div class="btns" style="margin-top:14px"><button class="btn g full" type="button" data-x="save">حفظ التاريخ لحساب الصرف اليومي فقط</button></div>';
+  openSheet(h,c=>{
+    const upd=()=>{
+      const np=c.querySelector("#np_date").value;
+      const box=c.querySelector("#np_preview");
+      if(np&&np>t){
+        const days=Math.max(1,daysBetween(t,np));
+        const per=avail>0?avail/days:0;
+        box.innerHTML='<div class="cap">معاينة الصرف اليومي المسموح</div><div><span class="big n '+(avail<=0?'neg':'pos')+'" style="font-size:34px">'+fmt(per)+'</span><span class="cur">ريال / يوم</span></div><div class="cap">المتبقي الحالي: <b class="n">'+sgn(avail)+'</b> ريال ÷ <b class="n">'+days+'</b> يوم متبقي حتى <b>'+dLabel(np)+'</b></div>';
+      }else if(np){
+        box.innerHTML='<div class="cap" style="color:var(--red)">التاريخ المختار ('+dLabel(np)+') يوافق اليوم أو تاريخاً سابقاً. لحساب الصرف اليومي اختر تاريخاً مستقبلياً (بعد '+dLabel(t)+').</div>';
+      }else{
+        box.innerHTML='<div class="cap">اختر تاريخ استلام الراتب القادم بالأعلى ليظهر لك المبلغ المسموح صرفه يومياً.</div>';
+      }
+    };
+    upd();
+    c.addEventListener("input",upd);
+    c.addEventListener("change",upd);
+    c.addEventListener("click",ev=>{
+      const b=ev.target.closest("button");if(!b)return;
+      if(b.dataset.x==="close"){closeSheet();return;}
+      if(b.dataset.x==="clr"){c.querySelector("#np_date").value="";upd();return;}
+      if(b.dataset.x==="fixmistake"){
+        const np=c.querySelector("#np_date").value||(cur.date>t?cur.date:D.settings.nextPay);
+        removeCycleById(cur.id);
+        if(np)D.settings.nextPay=np;
+        undoBanner="تم إلغاء استلام راتب "+ymLabel(cur.ym)+" وحفظ موعد الراتب القادم لحساب الصرف اليومي";
+        closeSheet();commit("إلغاء استلام راتب "+ymLabel(cur.ym));return;
+      }
+      if(b.dataset.x==="save"){
+        D.settings.nextPay=c.querySelector("#np_date").value||"";
+        closeSheet();commit("تحديد تاريخ الراتب القادم لحساب الصرف اليومي");
+      }
+    });
+  });
+}
+
 function salarySheet(cy){
   const isNew=!cy;const cs=cycleList();const last=cs[cs.length-1];
   cy=cy?clone(cy):{id:"cy_"+uid(),ym:last.virtual?last.ym:ymAdd(last.ym,1),date:todayISO(),salary:salaryFor()};
-  let h=shead(isNew?"استلام الراتب":"تعديل الراتب",isNew?"تم":"حفظ");
-  h+='<input class="amount money" id="s_amt" type="text" inputmode="numeric" autocomplete="off" placeholder="0" value="'+fmtIn(cy.salary)+'" aria-label="مبلغ الراتب"><div style="text-align:center;color:var(--ink2);margin-top:-4px">ريال</div>';
+  let h='<div class="shead"><button type="button" data-x="close">إلغاء</button><h2>'+(isNew?"تأكيد استلام الراتب":"تعديل الراتب")+'</h2><button type="button" data-x="save">'+(isNew?"نعم، استلمته":"حفظ")+'</button></div>';
+  if(isNew){
+    h+='<div class="alert g" style="background:var(--greenSoft);color:var(--ink);border:1.5px solid var(--green);margin-top:0;margin-bottom:12px">'+
+      '<b id="s_qtitle" style="color:var(--green);font-size:17px">هل تم استلام راتب شهر '+ymLabel(cy.ym)+'؟</b>'+
+      '<p style="color:var(--ink2);margin-top:4px">إذا ضغطت <b>«نعم، تم استلام الراتب»</b> سيُضاف الراتب الجديد مع خصم المصروفات الثابتة.<br>أما إذا كنت تريد فقط وضع تاريخ الراتب القادم ليحسب لك كم تصرف يومياً، اضغط <b>«لا، تحديد موعد الراتب القادم فقط»</b>.</p>'+
+      '<div class="btns" style="margin-top:10px">'+
+      '<button class="btn g" type="button" data-x="save" id="s_yesbtn">نعم، تم استلام راتب شهر '+ymLabel(cy.ym)+'</button>'+
+      '<button class="btn b" type="button" data-x="tonextpay">لا، تحديد موعد الراتب القادم فقط (للصرف اليومي)</button>'+
+      '</div></div>';
+  }
+  h+='<div class="gh">مبلغ الراتب</div><input class="amount money" id="s_amt" type="text" inputmode="numeric" autocomplete="off" placeholder="0" value="'+fmtIn(cy.salary)+'" aria-label="مبلغ الراتب"><div style="text-align:center;color:var(--ink2);margin-top:-4px">ريال</div>';
   h+='<div class="group" style="margin-top:12px"><div class="fld"><label for="s_ym">راتب شهر</label><input id="s_ym" type="month" value="'+cy.ym+'" style="font:inherit;border:0;background:none;color:var(--ink);direction:ltr"></div>'+
-    '<div class="fld"><label for="s_date">تاريخ استلام هذا الراتب</label><input id="s_date" type="date" value="'+cy.date+'"></div>'+
-    '<div class="fld"><label for="s_next">موعد استلام الراتب القادم (تحدده أنت)</label><input id="s_next" type="date" value="'+esc(D.settings.nextPay||"")+'"></div>'+
+    '<div class="fld"><label for="s_date">تاريخ استلام هذا الراتب الفعلي</label><input id="s_date" type="date" value="'+cy.date+'"></div>'+
+    (isNew?'<div class="fld"><label for="s_ded_obl">خصم المصروفات الثابتة تلقائياً ('+fmt(oblTotal())+' ريال)</label><input id="s_ded_obl" class="sw" type="checkbox" checked></div>':'')+
+    '<div class="fld"><label for="s_next">موعد الراتب الذي يليه (لحساب الصرف اليومي)</label><input id="s_next" type="date" value="'+esc(D.settings.nextPay&&D.settings.nextPay>todayISO()?D.settings.nextPay:"")+'"></div>'+
     '<div class="fld"><label for="s_keep">اجعله الراتب الافتراضي</label><input id="s_keep" class="sw" type="checkbox"'+(isNew?' checked':'')+'></div></div>';
-  h+='<p class="gf">الحسبة الجديدة تبدأ من تاريخ استلام هذا الراتب، وموعد الراتب القادم تحدده أنت يدوياً (ولن يتم احتسابه تلقائياً).</p><p class="msg" id="s_msg" style="color:var(--red)"></p>';
+  h+='<div class="group" style="margin-top:10px" id="s_netbox"></div>';
+  h+='<p class="gf">ملاحظة: إذا وضعت تاريخاً مستقبلياً لم يحن بعد، سيحفظه التطبيق كموعد للراتب القادم لحساب الصرف اليومي ولن يضيف الراتب الآن.</p><p class="msg" id="s_msg" style="color:var(--red)"></p>';
   if(!isNew)h+=delBox("إلغاء وحذف استلام هذا الراتب");
-  openSheet(h,c=>{c.addEventListener("click",ev=>{const t=ev.target.closest("button");if(!t)return;
-    if(t.dataset.x==="close"){closeSheet();return;}
-    if(t.dataset.x==="save"){const a=num(c.querySelector("#s_amt"));if(!(a>0)){c.querySelector("#s_msg").textContent="اكتب مبلغ الراتب.";return;}
-      cy.salary=a;cy.ym=c.querySelector("#s_ym").value||cy.ym;cy.date=c.querySelector("#s_date").value||todayISO();
-      if(D.cycles.some(x=>x.id!==cy.id&&x.ym===cy.ym)){c.querySelector("#s_msg").textContent="راتب "+ymLabel(cy.ym)+" مسجّل من قبل.";return;}
-      if(c.querySelector("#s_keep").checked)D.settings.salary=a;
-      D.settings.nextPay=c.querySelector("#s_next").value||"";
-      const first=!D.cycles.length;
-      const i=D.cycles.findIndex(x=>x.id===cy.id);if(i>=0)D.cycles[i]=cy;else D.cycles.push(cy);
-      if(first)D.oblPaid.forEach(x=>{if(x.cy==="virtual")x.cy=cy.id;});
-      homeIdx=null;spendIdx=null;closeSheet();commit();}
-  });armDelete(c,()=>{removeCycleById(cy.id);closeSheet();commit();});});
+  openSheet(h,c=>{
+    const upd=()=>{
+      const a=num(c.querySelector("#s_amt"));
+      const ym=c.querySelector("#s_ym").value||cy.ym;
+      const dedEl=c.querySelector("#s_ded_obl");
+      const ded=dedEl?dedEl.checked:true;
+      const ob=oblTotal();
+      const qt=c.querySelector("#s_qtitle"),yb=c.querySelector("#s_yesbtn");
+      if(qt)qt.textContent="هل تم استلام راتب شهر "+ymLabel(ym)+"؟";
+      if(yb)yb.textContent="نعم، تم استلام راتب شهر "+ymLabel(ym);
+      const nb=c.querySelector("#s_netbox");
+      if(nb){
+        nb.innerHTML='<div class="row"><div class="k">قيمة الراتب المضاف</div><div class="v n" style="color:var(--green)">+'+fmt(a)+'</div></div>'+
+          '<div class="row"><div class="k">خصم المصروفات الثابتة</div><div class="v n" style="color:#e08a1e">−'+fmt(ded?ob:0)+'</div></div>'+
+          '<div class="row"><div class="k"><b>الصافي المتبقي بعد خصم الثابتة</b></div><div class="v n" style="color:'+(a-(ded?ob:0)<0?'var(--red)':'var(--green)')+'"><b>'+sgn(a-(ded?ob:0))+' ريال</b></div></div>';
+      }
+    };
+    upd();
+    c.addEventListener("input",upd);
+    c.addEventListener("change",upd);
+    c.addEventListener("click",ev=>{const t=ev.target.closest("button");if(!t)return;
+      if(t.dataset.x==="close"){closeSheet();return;}
+      if(t.dataset.x==="tonextpay"){
+        const d1=c.querySelector("#s_date").value,d2=c.querySelector("#s_next").value;
+        if(d2&&d2>todayISO())D.settings.nextPay=d2;
+        else if(d1&&d1>todayISO())D.settings.nextPay=d1;
+        closeSheet();nextPaySheet();return;
+      }
+      if(t.dataset.x==="save"){
+        const a=num(c.querySelector("#s_amt"));if(!(a>0)){c.querySelector("#s_msg").textContent="اكتب مبلغ الراتب.";return;}
+        const pickedDate=c.querySelector("#s_date").value||todayISO();
+        if(isNew&&pickedDate>todayISO()){
+          D.settings.nextPay=pickedDate;
+          if(c.querySelector("#s_keep").checked)D.settings.salary=a;
+          undoBanner="التاريخ المختار ("+dLabel(pickedDate)+") في المستقبل، لذلك تم حفظه كموعد للراتب القادم لحساب الصرف اليومي فقط دون إضافة الراتب الآن.";
+          closeSheet();commit("تحديد موعد الراتب القادم ("+dLabel(pickedDate)+")");return;
+        }
+        cy.salary=a;cy.ym=c.querySelector("#s_ym").value||cy.ym;cy.date=pickedDate;
+        if(D.cycles.some(x=>x.id!==cy.id&&x.ym===cy.ym)){c.querySelector("#s_msg").textContent="راتب "+ymLabel(cy.ym)+" مسجّل من قبل.";return;}
+        if(c.querySelector("#s_keep").checked)D.settings.salary=a;
+        const nextVal=c.querySelector("#s_next").value||"";
+        if(nextVal)D.settings.nextPay=nextVal;
+        else if(D.settings.nextPay&&D.settings.nextPay<=cy.date)D.settings.nextPay="";
+        const first=!D.cycles.length;
+        const i=D.cycles.findIndex(x=>x.id===cy.id);if(i>=0)D.cycles[i]=cy;else D.cycles.push(cy);
+        if(first)D.oblPaid.forEach(x=>{if(x.cy==="virtual")x.cy=cy.id;});
+        const dedEl=c.querySelector("#s_ded_obl");
+        if(isNew&&(!dedEl||dedEl.checked)){
+          D.settings.obligations.filter(o=>!o.stopped&&+o.amount>0).forEach(o=>{
+            if(!D.oblPaid.some(p=>p.cy===cy.id&&p.ob===o.id)){
+              D.oblPaid.push({id:uid(),ob:o.id,name:o.name,cy:cy.id,amount:+o.amount||0,date:cy.date});
+            }
+          });
+        }
+        homeIdx=null;spendIdx=null;closeSheet();commit("استلام راتب شهر "+ymLabel(cy.ym));}
+    });armDelete(c,()=>{removeCycleById(cy.id);closeSheet();commit("إلغاء استلام راتب شهر "+ymLabel(cy.ym));});});
 }
 
 function dateConfigSheet(){
   const cs=cycleList();const idx=(homeIdx===null||homeIdx>=cs.length)?curIdx(cs):homeIdx;const cur=cs[idx];
-  let h=shead("تحديد التواريخ واستلام الراتب","حفظ");
-  h+='<div class="gh">الحسبة الحالية ('+(cur.virtual?"قبل تسجيل استلام الراتب":"راتب مسجّل")+')</div><div class="group">'+
-    '<div class="fld"><label for="dc_ym">شهر الحسبة الحالية</label><input id="dc_ym" type="month" value="'+cur.ym+'" style="font:inherit;border:0;background:none;color:var(--ink);direction:ltr"></div>'+
-    '<div class="fld"><label for="dc_start">تاريخ بداية الحسبة / الاستلام</label><input id="dc_start" type="date" value="'+cur.date+'"></div>'+
-    '</div><p class="gf">هذا التاريخ هو اليوم الذي تبدأ منه حسبة مصروفات ومتوسط صرف هذا الشهر.</p>';
-  h+='<div class="gh">موعد استلام راتب الشهر القادم (يدوياً)</div><div class="group">'+
+  let h=shead("تحديد التواريخ والراتب","حفظ");
+  h+='<div class="gh">1. موعد استلام الراتب القادم (لحساب الصرف اليومي فقط)</div><div class="group">'+
     '<div class="fld"><label for="dc_next">تاريخ استلام الراتب القادم</label><input id="dc_next" type="date" value="'+esc(D.settings.nextPay||"")+'"></div>'+
     '<button class="add" type="button" data-x="clrnext" style="color:var(--red)">مسح تاريخ الراتب القادم (عدم تحديد موعد)</button>'+
     '</div><p class="gf" id="dc_info"></p>';
+  h+='<div class="gh">2. بداية الحسبة الحالية ('+(cur.virtual?"قبل تسجيل استلام الراتب":"راتب مسجّل")+')</div><div class="group">'+
+    '<div class="fld"><label for="dc_ym">شهر الحسبة الحالية</label><input id="dc_ym" type="month" value="'+cur.ym+'" style="font:inherit;border:0;background:none;color:var(--ink);direction:ltr"></div>'+
+    '<div class="fld"><label for="dc_start">تاريخ بداية الحسبة الحالية</label><input id="dc_start" type="date" value="'+cur.date+'"></div>'+
+    '</div><p class="gf">هذا التاريخ هو اليوم الذي بدأت منه حسبة مصروفات هذا الشهر (لا تضع هنا تاريخ الراتب القادم؛ ضع تاريخ الراتب القادم في الخانة رقم 1 بالأعلى).</p>';
   if(!cur.virtual){
     h+='<div class="gh">إلغاء استلام الراتب</div><div class="group"><button class="add" type="button" data-x="undocy" style="color:var(--red)">إلغاء استلام راتب شهر '+ymLabel(cur.ym)+' (الرجوع للخطوة السابقة)</button></div>';
   }
@@ -983,8 +1151,8 @@ function dateConfigSheet(){
     const upd=()=>{
       const np=c.querySelector("#dc_next").value,t=todayISO();
       const el=c.querySelector("#dc_info");
-      if(np&&np>t)el.textContent="باقي "+daysBetween(t,np)+" يوم من اليوم ("+dLabel(t)+") حتى استلام الراتب القادم ("+dLabel(np)+").";
-      else if(np)el.textContent="التاريخ المحدد ("+dLabel(np)+") قد مضى أو يوافق اليوم.";
+      if(np&&np>t)el.textContent="باقي "+daysBetween(t,np)+" يوم من اليوم ("+dLabel(t)+") حتى استلام الراتب القادم ("+dLabel(np)+") — سيظهر لك الصرف اليومي في الرئيسية دون إضافة الراتب الآن.";
+      else if(np)el.textContent="التاريخ المحدد ("+dLabel(np)+") قد حلّ. لن يُضاف الراتب تلقائياً حتى تؤكد استلامه بـ «نعم».";
       else el.textContent="لم يتم تحديد تاريخ للراتب القادم (لن يحسب التطبيق تاريخاً تلقائياً).";
     };
     upd();
@@ -996,9 +1164,15 @@ function dateConfigSheet(){
       if(b.dataset.x==="clrnext"){c.querySelector("#dc_next").value="";upd();return;}
       if(b.dataset.x==="undocy"){removeCycleById(cur.id);closeSheet();commit("إلغاء استلام راتب شهر "+ymLabel(cur.ym));return;}
       if(b.dataset.x==="save"){
+        const t=todayISO();
         const ym=c.querySelector("#dc_ym").value||cur.ym;
-        const sd=c.querySelector("#dc_start").value||cur.date;
-        const np=c.querySelector("#dc_next").value||"";
+        let sd=c.querySelector("#dc_start").value||cur.date;
+        let np=c.querySelector("#dc_next").value||"";
+        if(sd>t){
+          if(!np)np=sd;
+          sd=cur.date<=t?cur.date:t;
+          undoBanner="تم وضع التاريخ المستقبلي ("+dLabel(np)+") في موعد الراتب القادم لحساب الصرف اليومي فقط دون إضافة راتب جديد.";
+        }
         if(cur.virtual){
           D.settings.startYm=ym;
           D.settings.startDate=sd;
@@ -1233,6 +1407,7 @@ document.addEventListener("click",ev=>{
     case "redo":redoOne();break;
     case "clearbanner":undoBanner="";renderHome();break;
     case "hist":historySheet();break;
+    case "nextpay":nextPaySheet();break;
     case "dates":dateConfigSheet();break;
     case "incprev":{
       const ds=[];
