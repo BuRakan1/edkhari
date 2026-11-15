@@ -198,7 +198,8 @@ const has=(l,y,m)=>l.some(p=>p[0]===y&&p[1]===m);
 
 function defaults(){
   return {v:3,
-    settings:{salary:0,payday:27,nextPay:"",carryOn:true,limitsOn:false,obligations:[],
+    settings:{salary:0,payday:27,nextPay:"",startDate:"",startYm:"",carryOn:true,limitsOn:false,obligations:[],
+      home:{showSavings:true,showZakat:true,showSavingsChart:true,showDaily:true,showObl:true,showStats:true,showCats:true,showIncome:true},
       zakat:{rate:2.577,goldPrice:490.43,goldDate:"2026-10-29",nisabGrams:85},
       bonus:{ramAmt:0,hajAmt:0,ramSave:100,hajSave:100},planStart:ymAdd(ymNow(),1),planMonths:60},
     categories:[
@@ -219,11 +220,104 @@ function defaults(){
 }
 let D=load();
 function load(){try{const r=localStorage.getItem(KEY);if(r){const o=JSON.parse(r);if(o&&o.v===3)return fix(o);}}catch(e){}return defaults();}
-function fix(o){const d=defaults();((o.settings||{}).obligations||[]).forEach(x=>{if(!x.id)x.id="o_"+uid();});o.settings=Object.assign(d.settings,o.settings||{});o.settings.zakat=Object.assign(d.settings.zakat,(o.settings&&o.settings.zakat)||{});o.settings.bonus=Object.assign(d.settings.bonus,(o.settings&&o.settings.bonus)||{});["categories","funds","fundTx","expenses","incomes","trips","oblPaid","cycles"].forEach(k=>{if(!Array.isArray(o[k]))o[k]=d[k];});return o;}
+function fix(o){const d=defaults();((o.settings||{}).obligations||[]).forEach(x=>{if(!x.id)x.id="o_"+uid();});o.settings=Object.assign(d.settings,o.settings||{});o.settings.home=Object.assign(d.settings.home,(o.settings&&o.settings.home)||{});o.settings.zakat=Object.assign(d.settings.zakat,(o.settings&&o.settings.zakat)||{});o.settings.bonus=Object.assign(d.settings.bonus,(o.settings&&o.settings.bonus)||{});["categories","funds","fundTx","expenses","incomes","trips","oblPaid","cycles"].forEach(k=>{if(!Array.isArray(o[k]))o[k]=d[k];});return o;}
 const UIK="edkhari.ui";function uiGet(k,d){try{const o=JSON.parse(localStorage.getItem(UIK)||"{}");return k in o?o[k]:d;}catch(e){return d;}}
 function uiSet(k,v){try{const o=JSON.parse(localStorage.getItem(UIK)||"{}");o[k]=v;localStorage.setItem(UIK,JSON.stringify(o));}catch(e){}}
-function save(){try{localStorage.setItem(KEY,JSON.stringify(D));}catch(e){}}
-function commit(){save();renderAll();}
+
+/* ---------- Undo / Redo & Step-by-Step History ---------- */
+const HKEY="edkhari.hist";
+let hist=loadHist(),lastSnap=JSON.stringify(D),undoBanner="";
+function loadHist(){try{const r=localStorage.getItem(HKEY);if(r){const o=JSON.parse(r);if(o&&Array.isArray(o.u)&&Array.isArray(o.r))return o;}}catch(e){}return {u:[],r:[]};}
+function saveHist(){try{localStorage.setItem(HKEY,JSON.stringify(hist));}catch(e){}}
+function tsFromId(id){if(!id)return 0;const raw=String(id).replace(/^(cy_|o_|c_|f_)/,"");const t=parseInt(raw.slice(0,8),36);return (t>1500000000000&&t<4000000000000)?t:0;}
+function diffLabel(a,b){
+  try{
+    if(b.cycles.length>a.cycles.length){const c=b.cycles[b.cycles.length-1];return "استلام راتب شهر "+ymLabel(c.ym)+" ("+fmt(c.salary)+" ريال)";}
+    if(b.cycles.length<a.cycles.length){const c=a.cycles.find(x=>!b.cycles.some(y=>y.id===x.id));return "إلغاء استلام راتب "+(c?ymLabel(c.ym):"");}
+    if(b.oblPaid.length>a.oblPaid.length){const p=b.oblPaid[b.oblPaid.length-1];return "دفع التزام: "+(p.name||"مصروف ثابت")+" ("+fmt(p.amount)+" ريال)";}
+    if(b.oblPaid.length<a.oblPaid.length){const p=a.oblPaid.find(x=>!b.oblPaid.some(y=>y.id===x.id));return "تراجع عن دفع: "+((p&&p.name)||"مصروف ثابت");}
+    if(b.expenses.length>a.expenses.length){const e=b.expenses[b.expenses.length-1];return "إضافة مصروف ("+fmt2(e.amount)+" ريال)";}
+    if(b.expenses.length<a.expenses.length){const e=a.expenses.find(x=>!b.expenses.some(y=>y.id===x.id));return "حذف مصروف ("+fmt2(e?e.amount:0)+" ريال)";}
+    if(b.fundTx.length>a.fundTx.length){const t=b.fundTx[b.fundTx.length-1];const tp={deposit:"إيداع ادخار",withdraw:"سحب من ادخار",zakat:"خصم زكاة",opening:"رصيد افتتاحي"}[t.type]||"حركة صندوق";return tp+" ("+fmt2(t.amount)+" ريال)";}
+    if(b.fundTx.length<a.fundTx.length){const t=a.fundTx.find(x=>!b.fundTx.some(y=>y.id===x.id));return "حذف حركة صندوق ("+fmt2(t?t.amount:0)+" ريال)";}
+    if(b.incomes.length>a.incomes.length){const i=b.incomes[b.incomes.length-1];return "إضافة دخل: "+i.name+" ("+fmt(i.amount)+" ريال)";}
+    if(b.trips.length>a.trips.length){const t=b.trips[b.trips.length-1];return "بدء سفرة: "+t.name;}
+  }catch(e){}
+  return "تعديل البيانات";
+}
+function dataSteps(){
+  const st=[];
+  D.cycles.forEach(c=>st.push({ts:tsFromId(c.id),date:c.date,kind:"cycle",id:c.id,title:"استلام راتب شهر "+ymLabel(c.ym),sub:"بتاريخ "+dLabel(c.date),amt:fmt(c.salary)+" ريال",col:"var(--green)",undo:()=>{
+    const rem=D.cycles.filter(x=>x.id!==c.id);
+    if(!rem.length){D.oblPaid.forEach(x=>{if(x.cy===c.id)x.cy="virtual";});}
+    else{const prev=rem[rem.length-1];D.oblPaid.forEach(x=>{if(x.cy===c.id)x.cy=prev.id;});}
+    D.cycles=rem;homeIdx=null;spendIdx=null;
+  }}));
+  D.oblPaid.forEach(p=>{const o=D.settings.obligations.find(x=>x.id===p.ob);const nm=(o&&o.name)||p.name||"مصروف ثابت";st.push({ts:tsFromId(p.id),date:p.date,kind:"obl",id:p.id,title:"دفع مصروف ثابت: "+nm,sub:"بتاريخ "+dLabel(p.date),amt:fmt(p.amount)+" ريال",col:"#e08a1e",undo:()=>{D.oblPaid=D.oblPaid.filter(x=>x.id!==p.id);}});});
+  D.expenses.forEach(e=>{const t=e.tripId?tripById(e.tripId):null;const c=t?tripCat(e.tcat):(catById(e.cat)||{name:"بدون فئة"});const nm=t?c.name:(e.cat?c.name:"مصروف");st.push({ts:tsFromId(e.id),date:e.date,kind:"exp",id:e.id,title:"مصروف: "+nm+(e.note?" · "+e.note:""),sub:"بتاريخ "+dLabel(e.date),amt:fmt2(e.amount)+" ريال",col:"var(--red)",undo:()=>{D.expenses=D.expenses.filter(x=>x.id!==e.id);}});});
+  D.fundTx.filter(t=>t.type!=="opening").forEach(t=>{const f=fundById(t.fund);const fn=f?f.name:"صندوق";const tp={deposit:"إيداع ادخار: ",withdraw:"سحب من ادخار: ",zakat:"خصم زكاة: "}[t.type]||"حركة: ";st.push({ts:tsFromId(t.id),date:t.date,kind:"ftx",id:t.id,title:tp+fn+(t.note?" · "+t.note:""),sub:"بتاريخ "+dLabel(t.date),amt:fmt2(t.amount)+" ريال",col:t.type==="zakat"?"var(--gold)":"var(--green)",undo:()=>{D.fundTx=D.fundTx.filter(x=>x.id!==t.id);}});});
+  D.incomes.forEach(i=>st.push({ts:tsFromId(i.id),date:i.date,kind:"inc",id:i.id,title:"دخل إضافي: "+i.name,sub:"بتاريخ "+dLabel(i.date),amt:fmt(i.amount)+" ريال",col:"var(--gold)",undo:()=>{D.incomes=D.incomes.filter(x=>x.id!==i.id);}}));
+  D.trips.forEach(tr=>st.push({ts:tsFromId(tr.id),date:tr.start,kind:"trip",id:tr.id,title:"سفرة: "+tr.name,sub:"من "+dLabel(tr.start),amt:"",col:"var(--blue)",undo:()=>{D.trips=D.trips.filter(x=>x.id!==tr.id);}}));
+  return st.sort((a,b)=>(b.ts-a.ts)||(a.date<b.date?1:a.date>b.date?-1:0));
+}
+function save(noHist){
+  try{
+    const cur=JSON.stringify(D);
+    if(!noHist&&cur!==lastSnap){
+      const lbl=diffLabel(JSON.parse(lastSnap),D);
+      hist.u.push({ts:Date.now(),label:lbl,snap:lastSnap});
+      if(hist.u.length>60)hist.u.shift();
+      hist.r=[];
+      saveHist();
+    }
+    lastSnap=cur;
+    localStorage.setItem(KEY,cur);
+  }catch(e){}
+}
+function commit(lbl){
+  if(lbl){
+    const cur=JSON.stringify(D);
+    if(cur!==lastSnap){
+      hist.u.push({ts:Date.now(),label:lbl,snap:lastSnap});
+      if(hist.u.length>60)hist.u.shift();
+      hist.r=[];
+      saveHist();
+      lastSnap=cur;
+    }
+  }
+  save(!!lbl);renderAll();
+}
+function undoOne(){
+  if(hist.u.length){
+    const it=hist.u.pop();
+    hist.r.push({ts:Date.now(),label:it.label,snap:JSON.stringify(D)});
+    D=fix(JSON.parse(it.snap));
+    homeIdx=null;spendIdx=null;
+    save(true);saveHist();
+    undoBanner="تم التراجع عن: "+it.label;
+    renderAll();return true;
+  }
+  const st=dataSteps();
+  if(st.length){
+    const top=st[0];
+    hist.r.push({ts:Date.now(),label:top.title+" ("+top.amt+")",snap:JSON.stringify(D)});
+    top.undo();
+    save(true);saveHist();
+    undoBanner="تم التراجع عن: "+top.title+(top.amt?" ("+top.amt+")":"");
+    renderAll();return true;
+  }
+  return false;
+}
+function redoOne(){
+  if(!hist.r.length)return false;
+  const it=hist.r.pop();
+  hist.u.push({ts:Date.now(),label:it.label,snap:JSON.stringify(D)});
+  D=fix(JSON.parse(it.snap));
+  homeIdx=null;spendIdx=null;
+  save(true);saveHist();
+  undoBanner="تمت الإعادة: "+it.label;
+  renderAll();return true;
+}
 
 const catById=id=>D.categories.find(c=>c.id===id);
 const fundById=id=>D.funds.find(f=>f.id===id);
@@ -236,7 +330,20 @@ const tripCat=id=>TRIPCATS.find(c=>c.id===id)||TRIPCATS[4];
 function salaryFor(){return +D.settings.salary||0;}
 function cycleList(){
   const cs=D.cycles.slice().sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:0);
-  if(!cs.length){const d=new Date();let ym=ymNow();if(d.getDate()<15)ym=ymAdd(ym,-1);return [{id:"virtual",ym,date:ym+"-01",salary:salaryFor(),virtual:true}];}
+  if(!cs.length){
+    const sd=D.settings.startDate;
+    if(sd)return [{id:"virtual",ym:D.settings.startYm||sd.slice(0,7),date:sd,salary:salaryFor(),virtual:true}];
+    const ds=[];
+    D.expenses.forEach(e=>{if(e.date)ds.push(e.date);});
+    D.fundTx.forEach(t=>{if(t.type!=="opening"&&t.date&&t.date>"0000-00-00")ds.push(t.date);});
+    D.incomes.forEach(i=>{if(i.date)ds.push(i.date);});
+    D.oblPaid.forEach(p=>{if(p.date)ds.push(p.date);});
+    ds.sort();
+    const minD=ds[0];
+    let ym=D.settings.startYm||(minD?minD.slice(0,7):ymAdd(ymNow(),-1));
+    const date=minD&&minD<ym+"-01"?minD:(ym+"-01");
+    return [{id:"virtual",ym,date,salary:salaryFor(),virtual:true}];
+  }
   return cs;
 }
 function curIdx(cs){const t=todayISO();let i=0;cs.forEach((c,k)=>{if(c.date<=t)i=k;});return i;}
@@ -256,37 +363,61 @@ function fundEvents(fid){
 function fundState(fid,asOf){
   asOf=asOf||todayISO();
   const r=(+D.settings.zakat.rate||0)/100;
-  let lots=[];let bal=0;
+  let lots=[];let bal=0,paidPart=0,paidFromFund=0;
+  const payments=[];
   fundEvents(fid).forEach(t=>{
     if(t.date>asOf)return;
     const a=+t.amount||0;
     if(t.type==="opening"){lots.push({date:t.hawl||t.date,amt:a});bal+=a;}
     else if(t.type==="deposit"){lots.push({date:t.date,amt:a});bal+=a;}
-    else if(t.type==="withdraw"||t.type==="zakat"){
+    else if(t.type==="withdraw"){
       let left=a;bal-=a;
       for(const l of lots){if(left<=0)break;const take=Math.min(l.amt,left);l.amt-=take;left-=take;}
-      if(t.type==="zakat"){lots.forEach(l=>{if(l.amt>0&&addYear(l.date)<=t.date)l.date=t.date;});}
+    }
+    else if(t.type==="zakat"){
+      payments.push(t);
+      const ded=t.deductFund!==false;
+      if(ded){
+        let left=a;bal-=a;
+        for(const l of lots){if(left<=0)break;const take=Math.min(l.amt,left);l.amt-=take;left-=take;}
+      }
+      const isReset=t.resetHawl!==undefined?!!t.resetHawl:!t.partial;
+      if(isReset){
+        lots.forEach(l=>{if(l.amt>0&&addYear(l.date)<=t.date)l.date=t.date;});
+        paidPart=0;paidFromFund=0;
+      }else{
+        paidPart+=a;
+        if(ded)paidFromFund+=a;
+      }
     }
     lots=lots.filter(l=>l.amt>0.004);
   });
-  let due=0,dueBase=0,next=null;
+  let dueGross=0,dueBase=0,next=null;
   lots.forEach(l=>{
     let n=0,d=l.date;while(addYear(d)<=asOf){n++;d=addYear(d);}
-    if(n>0){due+=l.amt*(1-Math.pow(1-r,n));dueBase+=l.amt;}
+    if(n>0){dueGross+=l.amt*(1-Math.pow(1-r,n));dueBase+=l.amt;}
     const nd=addYear(n>0?d:l.date);if(!next||nd<next)next=nd;
   });
-  return {bal,lots,due,dueBase,next,reserve:bal*r};
+  const grossReserve=Math.max(0,(bal+paidFromFund)*r);
+  const due=Math.max(0,dueGross-paidPart);
+  const reserve=Math.max(0,grossReserve-paidPart);
+  return {bal,lots,due,dueGross,dueBase,next,reserve,grossReserve,paidPart,paidFromFund,payments};
 }
 function zakatSummary(){
   const zf=D.funds.filter(f=>f.zakat);
   const st=zf.map(f=>({f,s:fundState(f.id)}));
   const total=st.reduce((a,x)=>a+x.s.bal,0);
+  const paidFromFund=st.reduce((a,x)=>a+x.s.paidFromFund,0);
+  const paidPart=st.reduce((a,x)=>a+x.s.paidPart,0);
+  const grossReserve=st.reduce((a,x)=>a+x.s.grossReserve,0);
+  const dueGross=st.reduce((a,x)=>a+x.s.dueGross,0);
   const nisab=(+D.settings.zakat.goldPrice||0)*(+D.settings.zakat.nisabGrams||85);
-  const reach=total>=nisab&&nisab>0;
-  const due=reach?st.reduce((a,x)=>a+x.s.due,0):0;
-  const reserve=reach?st.reduce((a,x)=>a+x.s.reserve,0):0;
+  const reach=(total+paidFromFund)>=nisab&&nisab>0;
+  const due=reach?Math.max(0,dueGross-paidPart):0;
+  const reserve=reach?Math.max(0,grossReserve-paidPart):0;
   let next=null;st.forEach(x=>{if(x.s.next&&(!next||x.s.next<next))next=x.s.next;});
-  return {st,total,nisab,reach,due,reserve,next};
+  const payments=D.fundTx.filter(t=>t.type==="zakat").slice().sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0);
+  return {st,total,nisab,reach,due,dueGross,reserve,grossReserve,paidPart,next,payments};
 }
 
 function cycleData(cs,i){
@@ -302,6 +433,7 @@ function monthData(c,r,carry){carry=+carry||0;
     return {f,amt};
   });
   const depTotal=dep.reduce((a,d)=>a+d.amt,0);
+  const zakSal=D.fundTx.filter(t=>t.type==="zakat"&&t.src==="salary"&&inR(t.date,r)).reduce((a,t)=>a+(+t.amount||0),0);
   const paidL=D.oblPaid.filter(x=>x.cy===c.id);
   const obItems=D.settings.obligations.filter(o=>!o.stopped||o.stopped>=r[1]||paidL.some(x=>x.ob===o.id)).map(o=>{const p=paidL.find(x=>x.ob===o.id);return {o,p};});
   const obl=paidL.reduce((a,x)=>a+(+x.amount||0),0);
@@ -311,7 +443,7 @@ function monthData(c,r,carry){carry=+carry||0;
   const inc=D.incomes.filter(i=>inR(i.date,r));
   const incSpend=inc.reduce((a,i)=>a+Math.max(0,(+i.amount||0)-(+i.toAmount||0)),0);
   const byCat={};exp.forEach(e=>{const k=e.tripId?"trip:"+e.tripId:(e.cat||"none");byCat[k]=(byCat[k]||0)+(+e.amount||0);});
-  return {c,r,carry,salary,dep,depTotal,obl,oblDue,obItems,paidL,exp,expTotal,inc,incSpend,byCat,remain:carry+salary+incSpend-depTotal-obl-expTotal};
+  return {c,r,carry,salary,dep,depTotal,zakSal,obl,oblDue,obItems,paidL,exp,expTotal,inc,incSpend,byCat,remain:carry+salary+incSpend-depTotal-zakSal-obl-expTotal};
 }
 function catLabelKey(k){if(k.startsWith("trip:")){const t=tripById(k.slice(5));return {name:"سفر: "+(t?t.name:""),color:"#5c7cfa"};}if(k==="none")return {name:"بدون فئة",color:"#adb5bd"};const c=catById(k);return {name:c?c.name:"فئة محذوفة",color:c?c.color:"#adb5bd"};}
 
@@ -328,28 +460,62 @@ let homeIdx=null,spendIdx=null,spendFilter="all",saveSeg="funds",spendSeg="list"
 function renderHome(){
   const cs=cycleList();const ci=curIdx(cs);if(homeIdx===null||homeIdx>=cs.length)homeIdx=ci;const c=cs[homeIdx];const r=rangeOf(cs,homeIdx);const isCur=homeIdx===ci;
   const md=cycleData(cs,homeIdx);const z=zakatSummary();const tr=activeTrip();
+  const hp=D.settings.home||{};
   const prev=homeIdx>0?monthData(cs[homeIdx-1],rangeOf(cs,homeIdx-1),0):{expTotal:0,byCat:{}};
   const endShown=r[1]==="9999-12-31"?"":dayBefore(r[1]);
-  let h='<div class="top"><div><h1 class="lt">الرئيسية</h1><p class="sub">راتب '+ymLabel(c.ym)+(c.virtual?'':' · من '+dLabel(c.date)+(endShown?' إلى '+dLabel(endShown):''))+'</p></div><div class="mswitch noprint"><button type="button" data-act="hm" data-k="-1" aria-label="الراتب السابق"'+(homeIdx>0?'':' disabled style="opacity:.35"')+'>›</button><button type="button" data-act="hm" data-k="1" aria-label="الراتب التالي"'+(homeIdx<cs.length-1?'':' disabled style="opacity:.35"')+'>‹</button></div></div>';
-  if(isCur){const nym=c.virtual?c.ym:ymAdd(c.ym,1);h+='<button class="btn g full" type="button" data-act="salary" style="margin-bottom:4px">تم استلام راتب شهر '+ymLabel(nym)+'</button>'+(c.virtual?'<p class="gf" style="margin-bottom:8px">سجّل استلام راتبك عشان تبدأ حسبة الشهر من يوم نزوله.</p>':'');}
+  const canUndo=hist.u.length>0||dataSteps().length>0,canRedo=hist.r.length>0;
+  let h='<div class="top"><div><h1 class="lt">الرئيسية</h1><p class="sub">راتب '+ymLabel(c.ym)+' · من '+dLabel(c.date)+(endShown?' إلى '+dLabel(endShown):(D.settings.nextPay&&isCur?' إلى '+dLabel(dayBefore(D.settings.nextPay)):''))+'</p></div><div class="mswitch noprint"><button type="button" data-act="hm" data-k="-1" aria-label="الراتب السابق"'+(homeIdx>0?'':' disabled style="opacity:.35"')+'>›</button><button type="button" data-act="hm" data-k="1" aria-label="الراتب التالي"'+(homeIdx<cs.length-1?'':' disabled style="opacity:.35"')+'>‹</button></div></div>';
+  h+='<div class="scrollx noprint" style="margin-bottom:6px">'+
+    '<button class="chip" type="button" data-act="undo"'+(canUndo?'':' disabled style="opacity:.4"')+'>↶ تراجع خطوة</button>'+
+    (canRedo?'<button class="chip" type="button" data-act="redo">↷ إعادة خطوة</button>':'')+
+    '<button class="chip" type="button" data-act="hist">سجل الخطوات والتراجع</button>'+
+    '<button class="chip" type="button" data-act="dates">تحديد التواريخ والراتب</button>'+
+    '<button class="chip" type="button" data-act="custhome">تخصيص الواجهة</button>'+
+  '</div>';
+  if(undoBanner){
+    h+='<div class="alert g" style="background:var(--greenSoft);color:var(--green);margin-top:0;margin-bottom:10px"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px"><b>'+esc(undoBanner)+'</b><button type="button" data-act="clearbanner" style="border:0;background:none;color:inherit;font-size:18px;cursor:pointer;padding:0 4px">×</button></div><div class="btns">'+(canUndo?'<button class="btn sm" type="button" data-act="undo">↶ تراجع خطوة أخرى</button>':'')+(canRedo?'<button class="btn sm" type="button" data-act="redo">↷ إعادة الخطوة</button>':'')+'<button class="btn sm" type="button" data-act="hist">عرض السجل</button></div></div>';
+  }
+  if(isCur){
+    const nym=c.virtual?c.ym:ymAdd(c.ym,1);
+    h+='<div class="btns" style="margin-bottom:4px"><button class="btn g" type="button" data-act="salary">تم استلام راتب شهر '+ymLabel(nym)+'</button>'+(!c.virtual?'<button class="btn r" type="button" data-act="undocycle" data-id="'+c.id+'" style="background:var(--redSoft)">إلغاء استلام راتب '+ymLabel(c.ym)+'</button>':'')+'</div>';
+    if(c.virtual)h+='<p class="gf" style="margin-bottom:8px">لم يُسجّل استلام الراتب بعد. يمكنك تحديد تاريخ بداية الحسبة وموعد الراتب القادم يدوياً من «تحديد التواريخ والراتب».</p>';
+  }
   if(!(+D.settings.salary))h+='<div class="alert t"><b>ابدأ من هنا</b><p>أدخل راتبك والتزاماتك من الإعدادات، وأضف صناديق الادخار من صفحة الادخار.</p><div class="btns"><a class="btn b sm" href="#setup">الإعدادات</a><button class="btn sm" type="button" data-act="import">استرجاع نسخة احتياطية</button></div></div>';
-  if(z.reach&&z.due>0.5)h+='<div class="alert z"><b>حان وقت الزكاة</b><p>مبالغ في ادخارك حال عليها الحول. الزكاة المستحقة: <b class="n">'+fmt2(z.due)+'</b> ريال.</p><div class="btns"><button class="btn sm" type="button" data-act="payzakat" style="background:var(--gold);color:#fff">تم دفع الزكاة</button></div></div>';
+  if(homeIdx===0){
+    const prevExp=D.expenses.filter(e=>e.date&&e.date<c.date&&!e.fromFund&&(!e.tripId||(tripById(e.tripId)||{}).mode==="remain")).reduce((a,e)=>a+(+e.amount||0),0);
+    const prevDep=D.fundTx.filter(t=>t.type==="deposit"&&t.src!=="other"&&t.date&&t.date<c.date).reduce((a,t)=>a+(+t.amount||0),0);
+    const prevTot=prevExp+prevDep;
+    if(prevTot>0){
+      h+='<div class="alert r"><b>عمليات سابقة غير محسوبة في هذا المتبقي ('+fmt(prevTot)+' ريال)</b><p>تاريخ بداية الحسبة الحالية هو <b>'+dLabel(c.date)+'</b>، لذلك لم يتم خصم '+
+        (prevDep?'إيداع ادخار (<b class="n">'+fmt(prevDep)+'</b>) ':'')+(prevDep&&prevExp?'و':'')+(prevExp?'مصروفات (<b class="n">'+fmt(prevExp)+'</b>) ':'')+
+        'مسجلة قبل هذا التاريخ (سيكون المتبقي بعد خصمها: <b class="n">'+sgn(md.remain-md.oblDue-prevTot)+'</b> ريال).</p><div class="btns"><button class="btn rf sm" type="button" data-act="incprev">ضمّها للحسبة الحالية</button><button class="btn sm" type="button" data-act="dates">تعديل التاريخ يدوياً</button></div></div>';
+    }
+  }
+  if(hp.showZakat!==false&&z.reach&&z.due>0.5)h+='<div class="alert z"><b>حان وقت الزكاة</b><p>مبالغ في ادخارك حال عليها الحول. الزكاة المستحقة: <b class="n">'+fmt2(z.due)+'</b> ريال.</p><div class="btns"><button class="btn sm" type="button" data-act="payzakat" style="background:var(--gold);color:#fff">خصم / دفع الزكاة</button></div></div>';
   if(tr)h+='<div class="alert t"><b>أنت في '+(tr.type==="mission"?"انتداب":"سفر")+': '+esc(tr.name)+'</b><p>المصروفات اللي تضيفها الحين تنحسب على السفرة.</p><div class="btns"><a class="btn b sm" href="#trip">تفاصيل السفرة</a></div></div>';
-  h+='<div class="hero" style="margin-top:12px"><div class="cap">المتبقي من راتب '+ymLabel(c.ym)+(c.virtual?'':' · <button type="button" data-act="editcycle" data-id="'+c.id+'" style="border:0;background:none;color:var(--green);font:inherit;padding:0;cursor:pointer">تعديل</button>')+'</div><div><span class="big n '+(md.remain-md.oblDue<0?'neg':'pos')+'">'+sgn(md.remain-md.oblDue)+'</span><span class="cur">ريال</span></div>'+(md.carry?'<div class="cap">يشمل <b class="n">'+sgn(md.carry)+'</b> '+(md.carry>0?'متبقي':'عجز')+' من راتب '+ymLabel(md.prevYm)+'</div>':'')+(md.oblDue?'<div class="cap">بعد حجز <b class="n">'+fmt(md.oblDue)+'</b> للمصروفات الثابتة اللي ما دفعتها</div>':'');
-  const parts=[{n:"الادخار",v:md.depTotal,c:"#0b7d5c"},{n:"الثابتة",v:md.obl+md.oblDue,c:"#e08a1e"}];
+  h+='<div class="hero" style="margin-top:12px"><div class="cap">المتبقي من راتب '+ymLabel(c.ym)+' · <button type="button" data-act="'+(c.virtual?'dates':'editcycle')+'" data-id="'+c.id+'" style="border:0;background:none;color:var(--green);font:inherit;padding:0;cursor:pointer">'+(c.virtual?'تعديل التاريخ':'تعديل أو حذف الراتب')+'</button></div><div><span class="big n '+(md.remain-md.oblDue<0?'neg':'pos')+'">'+sgn(md.remain-md.oblDue)+'</span><span class="cur">ريال</span></div>'+(md.carry?'<div class="cap">يشمل <b class="n">'+sgn(md.carry)+'</b> '+(md.carry>0?'متبقي':'عجز')+' من راتب '+ymLabel(md.prevYm)+'</div>':'')+(md.oblDue?'<div class="cap">بعد حجز <b class="n">'+fmt(md.oblDue)+'</b> للمصروفات الثابتة اللي ما دفعتها</div>':'')+(md.zakSal?'<div class="cap">مخصوم منه زكاة <b class="n">'+fmt2(md.zakSal)+'</b> ريال</div>':'');
+  const parts=[];
+  if(hp.showSavingsChart!==false)parts.push({n:"الادخار",v:md.depTotal,c:"#0b7d5c"});
+  if(md.zakSal>0&&hp.showZakat!==false)parts.push({n:"الزكاة",v:md.zakSal,c:"#a8730e"});
+  parts.push({n:"الثابتة",v:md.obl+md.oblDue,c:"#e08a1e"});
   Object.keys(md.byCat).sort((a,b)=>md.byCat[b]-md.byCat[a]).forEach(k=>{const L=catLabelKey(k);parts.push({n:L.name,v:md.byCat[k],c:L.color});});
   if(md.remain-md.oblDue>0)parts.push({n:"المتبقي",v:md.remain-md.oblDue,c:"var(--fill)"});
   h+='<div class="donutwrap">'+donut(parts)+'<div class="leg">'+parts.filter(p=>p.v>0).slice(0,8).map(p=>'<div><i class="dot" style="background:'+p.c+';'+(p.c==="var(--fill)"?'border:1px solid var(--sep)':'')+'"></i><span class="l">'+esc(p.n)+'</span><b>'+fmt(p.v)+'</b></div>').join("")+'</div></div></div>';
-  if(isCur&&md.salary){
-    const t=todayISO();const pd=Math.max(1,Math.min(28,+D.settings.payday||27));const np=D.settings.nextPay;const nxt=(np&&np>t)?np:ymAdd(c.ym,1)+"-"+pad(pd);
-    const daysLeft=Math.max(1,daysBetween(t,nxt));
+  if(isCur&&md.salary&&hp.showDaily!==false){
+    const t=todayISO();const np=D.settings.nextPay;const hasNext=!!(np&&np>t);
     const todayExp=md.exp.filter(e=>e.date===t).reduce((a,e)=>a+(+e.amount||0),0);
-    const avail=md.remain-md.oblDue;const per=avail>0?avail/daysLeft:0;
-    h+='<div class="hero" style="margin-top:12px"><div class="cap">مسموح لك تصرف يومياً لين الراتب</div><div><span class="big n '+(avail<=0?'neg':'pos')+'" style="font-size:38px">'+fmt(per)+'</span><span class="cur">ريال</span></div>'+
-      '<div class="cap">صرفت اليوم <b class="n">'+fmt(todayExp)+'</b> · باقي <b class="n">'+daysLeft+'</b> يوم على راتب '+ymLabel(ymAdd(c.ym,1))+' ('+dLabel(nxt)+')</div>'+
-      (avail<=0?'<div class="cap" style="margin-top:4px;color:var(--red)">صرفت كل المتبقي من هذا الراتب.</div>':'<div class="cap" style="margin-top:4px">ينحسب من جديد مع كل مصروف تضيفه.</div>')+'</div>';
+    const avail=md.remain-md.oblDue;
+    if(hasNext){
+      const daysLeft=Math.max(1,daysBetween(t,np));
+      const per=avail>0?avail/daysLeft:0;
+      h+='<div class="hero" style="margin-top:12px"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div class="cap">مسموح لك تصرف يومياً لين الراتب</div><button type="button" data-act="dates" style="border:0;background:none;color:var(--green);font:inherit;font-size:13.5px;font-weight:600;padding:0;cursor:pointer">تعديل الموعد</button></div><div><span class="big n '+(avail<=0?'neg':'pos')+'" style="font-size:38px">'+fmt(per)+'</span><span class="cur">ريال</span></div>'+
+        '<div class="cap">صرفت اليوم <b class="n">'+fmt(todayExp)+'</b> · باقي <b class="n">'+daysLeft+'</b> يوم على موعد الراتب القادم ('+dLabel(np)+')</div>'+
+        (avail<=0?'<div class="cap" style="margin-top:4px;color:var(--red)">صرفت كل المتبقي من هذا الراتب.</div>':'<div class="cap" style="margin-top:4px">محسوب حسب التاريخ الذي حددته أنت ('+dLabel(np)+').</div>')+'</div>';
+    }else{
+      h+='<div class="hero" style="margin-top:12px"><div class="cap">مسموح لك تصرف يومياً لين الراتب</div><p style="margin:6px 0 10px;font-size:14px;color:var(--ink2)">صرفت اليوم <b class="n">'+fmt(todayExp)+'</b> ريال · حدد متى تستلم راتب الشهر القادم يدوياً عشان ينحسب لك الصرف اليومي والأيام المتبقية (بدون احتساب تلقائي).</p><button class="btn b sm full" type="button" data-act="dates">تحديد تاريخ استلام الراتب القادم</button></div>';
+    }
   }
-  if(md.obItems.length||md.paidL.length){
+  if(hp.showObl!==false&&(md.obItems.length||md.paidL.length)){
     const unpaid=md.obItems.filter(x=>!x.p&&+x.o.amount);
     const open=uiGet("oblOpen",true);
     h+='<div class="group" style="margin-top:14px"><button class="row" type="button" data-act="togobl" aria-expanded="'+open+'"><span class="ic" style="background:#e08a1e">ث</span><div class="k"><b>المصروفات الثابتة كل شهر</b><small>مدفوع <span class="n">'+fmt(md.obl)+'</span> من <span class="n">'+fmt(md.obl+md.oblDue)+'</span>'+(unpaid.length?' · باقي '+unpaid.length+' لم يُدفع':' · كلها مدفوعة ✓')+'</small></div><span class="chev" style="transform:rotate('+(open?'-90':'0')+'deg);transition:transform .2s">‹</span></button>';
@@ -359,30 +525,38 @@ function renderHome(){
     h+='<a class="add" href="#setup" style="text-decoration:none">تعديل القائمة من الإعدادات</a>';}
     h+='</div>';
   }
-  if(isCur&&!md.depTotal&&D.funds.length)h+='<p class="gf">ما سجّلت ادخار من هذا الراتب. اضغط + واختر «إيداع ادخار».</p>';
-  const lastDay=isCur?todayISO():(endShown||todayISO());const day=Math.max(1,daysBetween(c.virtual?r[0]:c.date,lastDay)+1);
-  h+='<div class="tiles">';
-  h+='<div class="tile"><div class="t">متوسط الصرف اليومي</div><div class="x n">'+fmt(md.expTotal/Math.max(1,day))+'</div><div class="s">خلال '+day+' يوم</div></div>';
-  const diff=md.expTotal-prev.expTotal;
-  h+='<div class="tile"><div class="t">مقارنة بالراتب السابق</div><div class="x n" style="color:'+(diff>0?'var(--red)':'var(--green)')+'">'+(diff>0?'+':diff<0?'−':'')+fmt(Math.abs(diff))+'</div><div class="s">'+(prev.expTotal?(diff>0?'صرفت أكثر':'صرفت أقل'):'ما فيه بيانات سابقة')+'</div></div>';
-  h+='<div class="tile"><div class="t">الزكاة المحجوزة</div><div class="x n" style="color:var(--gold)">'+fmt2(z.reserve)+'</div><div class="s">'+(z.reach?'لا تصرفها':'المدخرات أقل من النصاب')+'</div></div>';
-  h+='<div class="tile"><div class="t">مجموع المدخرات</div><div class="x n">'+fmt(D.funds.reduce((a,f)=>a+fundState(f.id).bal,0))+'</div><div class="s">كل الصناديق</div></div>';
-  h+='</div>';
-  if(D.settings.limitsOn){const lc=D.categories.filter(k=>+k.limit>0);
+  if(hp.showSavings!==false&&hp.showSavingsChart!==false&&isCur&&!md.depTotal&&D.funds.length)h+='<p class="gf">ما سجّلت ادخار من هذا الراتب. اضغط + واختر «إيداع ادخار».</p>';
+  const lastDay=isCur?todayISO():(endShown||todayISO());const day=Math.max(1,daysBetween(c.date,lastDay)+1);
+  const tileList=[];
+  if(hp.showStats!==false){
+    tileList.push('<div class="tile"><div class="t">متوسط الصرف اليومي</div><div class="x n">'+fmt(md.expTotal/Math.max(1,day))+'</div><div class="s">من '+dLabel(c.date)+' ('+day+' يوم)</div></div>');
+    const diff=md.expTotal-prev.expTotal;
+    tileList.push('<div class="tile"><div class="t">مقارنة بالراتب السابق</div><div class="x n" style="color:'+(diff>0?'var(--red)':'var(--green)')+'">'+(diff>0?'+':diff<0?'−':'')+fmt(Math.abs(diff))+'</div><div class="s">'+(prev.expTotal?(diff>0?'صرفت أكثر':'صرفت أقل'):'ما فيه بيانات سابقة')+'</div></div>');
+  }
+  if(hp.showZakat!==false){
+    tileList.push('<div class="tile" data-act="payzakat" style="cursor:pointer"><div class="t">الزكاة المحجوزة</div><div class="x n" style="color:var(--gold)">'+fmt2(z.reserve)+'</div><div class="s">'+(z.paidPart>0?'مخصوم منها '+fmt2(z.paidPart)+' · ':'')+(z.reach?'اضغط لخصم/دفع زكاة':'المدخرات أقل من النصاب')+'</div></div>');
+  }
+  if(hp.showSavings!==false){
+    tileList.push('<div class="tile"><div class="t">مجموع المدخرات</div><div class="x n">'+fmt(D.funds.reduce((a,f)=>a+fundState(f.id).bal,0))+'</div><div class="s">كل الصناديق</div></div>');
+  }
+  if(tileList.length)h+='<div class="tiles">'+tileList.join("")+'</div>';
+  if(hp.showCats!==false&&D.settings.limitsOn){const lc=D.categories.filter(k=>+k.limit>0);
     if(lc.length){h+='<div class="gh">حدود الفئات</div><div class="group">';
       lc.sort((a,b)=>(md.byCat[b.id]||0)/b.limit-(md.byCat[a.id]||0)/a.limit).forEach(k=>{const sp=md.byCat[k.id]||0;const pc=sp/k.limit*100;const col=pc>100?'var(--red)':pc>=80?'var(--gold)':'var(--green)';
         h+='<div class="row"><span class="ic" style="background:'+k.color+'">'+esc(ini(k.name))+'</span><div class="k">'+esc(k.name)+' '+(pc>100?'<span class="pill r">تجاوزت الحد</span>':pc>=80?'<span class="pill g">قربت من الحد</span>':'')+'<div class="prog"><i style="width:'+Math.min(100,pc)+'%;background:'+col+'"></i></div><small><span class="n">'+fmt(sp)+'</span> من <span class="n">'+fmt(k.limit)+'</span> · '+(pc>100?'زيادة '+fmt(sp-k.limit):'باقي '+fmt(k.limit-sp))+'</small></div><div class="v n" style="color:'+col+'">'+Math.round(pc)+'٪</div></div>';});
       h+='</div>';}}
   const cats=Object.keys(md.byCat).sort((a,b)=>md.byCat[b]-md.byCat[a]);
-  if(cats.length){
+  if(hp.showCats!==false&&cats.length){
     h+='<div class="gh">وين راحت المصروفات</div><div class="group">';
     cats.forEach(k=>{const L=catLabelKey(k);const p=prev.byCat[k]||0;const ch=p?Math.round((md.byCat[k]-p)/p*100):null;
       h+='<div class="row"><i class="dot" style="background:'+L.color+'"></i><div class="k">'+esc(L.name)+'<small>'+Math.round(md.byCat[k]/Math.max(1,md.expTotal)*100)+'٪ من المصروفات'+(ch!==null?' · '+(ch>0?'زادت ':'نقصت ')+Math.abs(ch)+'٪ عن الراتب السابق':'')+'</small></div><div class="v n">'+fmt(md.byCat[k])+'</div></div>';});
     h+='</div>';
   }
-  h+='<div class="gh">دخل إضافي</div><div class="group">';
-  md.inc.forEach(i=>{h+='<button class="row" type="button" data-act="editinc" data-id="'+i.id+'"><div class="k">'+esc(i.name)+'<small>'+dLabel(i.date)+(+i.toAmount?' · للادخار '+fmt(i.toAmount):'')+(+i.amount-(+i.toAmount||0)>0?' · للصرف '+fmt(+i.amount-(+i.toAmount||0)):'')+'</small></div><div class="v n" style="color:var(--gold)">+'+fmt(i.amount)+'</div><span class="chev">‹</span></button>';});
-  h+='<button class="add" type="button" data-act="addinc">إضافة انتداب أو دخل إضافي</button></div>';
+  if(hp.showIncome!==false){
+    h+='<div class="gh">دخل إضافي</div><div class="group">';
+    md.inc.forEach(i=>{h+='<button class="row" type="button" data-act="editinc" data-id="'+i.id+'"><div class="k">'+esc(i.name)+'<small>'+dLabel(i.date)+(+i.toAmount?' · للادخار '+fmt(i.toAmount):'')+(+i.amount-(+i.toAmount||0)>0?' · للصرف '+fmt(+i.amount-(+i.toAmount||0)):'')+'</small></div><div class="v n" style="color:var(--gold)">+'+fmt(i.amount)+'</div><span class="chev">‹</span></button>';});
+    h+='<button class="add" type="button" data-act="addinc">إضافة انتداب أو دخل إضافي</button></div>';
+  }
   $("v-home").innerHTML=h;
 }
 function row(k,v,color,lead){return '<div class="row">'+(lead||'')+'<div class="k">'+k+'</div><div class="v n"'+(color?' style="color:'+color+'"':'')+'>'+v+'</div></div>';}
@@ -464,18 +638,28 @@ function renderSave(){
   h+=row("المال الخاضع للزكاة",fmt(z.total));
   h+=row("النصاب ("+fmt2(D.settings.zakat.nisabGrams)+" جم × "+fmt2(D.settings.zakat.goldPrice)+")",fmt(z.nisab));
   h+=row(z.reach?'<span class="pill u">بلغ النصاب</span>':'<span class="pill r">لم يبلغ النصاب</span>',"");
-  h+=row("الزكاة المحجوزة ("+(+D.settings.zakat.rate||0).toLocaleString("en-US",{maximumFractionDigits:3})+"٪)",fmt2(z.reserve),"var(--gold)");
-  h+=row("مستحقة الآن",fmt2(z.due),z.due>0.5?"var(--red)":null);
+  if(z.paidPart>0){
+    h+=row("إجمالي الزكاة قبل الخصم",fmt2(z.grossReserve));
+    h+=row("المدفوع للمستحقين (مخصوم)","−"+fmt2(z.paidPart),"var(--green)");
+  }
+  h+=row("الزكاة المتبقية ("+(+D.settings.zakat.rate||0).toLocaleString("en-US",{maximumFractionDigits:3})+"٪)",fmt2(z.reserve),"var(--gold)");
+  h+=row("مستحقة الآن (حال حولها)",fmt2(z.due),z.due>0.5?"var(--red)":null);
   h+=row("أقرب موعد حول",z.next?dLabel(z.next):"—");
   h+='</div>';
-  if(z.reach&&z.due>0.5)h+='<div style="margin-top:10px"><button class="btn full" type="button" data-act="payzakat" style="background:var(--gold);color:#fff">تم دفع الزكاة ('+fmt2(z.due)+')</button></div>';
-  h+='<p class="gf">كل إيداع له حوله الخاص (سنة ميلادية من تاريخه). سعر الذهب تحدّثه من الإعدادات.</p>';
+  h+='<div style="margin-top:10px"><button class="btn full" type="button" data-act="payzakat" style="background:var(--gold);color:#fff">خصم / دفع زكاة لمستحق (جزئي أو كلي)</button></div>';
+  if(z.payments.length){
+    h+='<div class="gh">دفعات الزكاة المسجلة</div><div class="group">'+z.payments.map(t=>{
+      const f=fundById(t.fund);const srcLbl=t.deductFund===false?(t.src==="salary"?"من الراتب":"من الزكاة فقط"):"من الصندوق";
+      return '<div class="row"><div class="k">'+(t.note?esc(t.note):"دفع زكاة")+'<small>'+dLabel(t.date)+' · '+(f?esc(f.name):"")+' · '+srcLbl+'</small></div><div class="v n" style="color:var(--gold)">−'+fmt2(t.amount)+'</div><button class="del" type="button" data-act="delzakat" data-id="'+t.id+'" aria-label="حذف الدفعة">−</button></div>';
+    }).join("")+'</div>';
+  }
+  h+='<p class="gf">يمكنك خصم أي مبلغ أعطيته لمستحق من الزكاة في أي وقت، وسيُخصم مباشرة من الزكاة المتبقية. سعر الذهب تحدّثه من الإعدادات.</p>';
   const ym=ymNow();
   h+='<div class="gh"><span>الصناديق</span><span>اضغط + للإيداع</span></div>';
   D.funds.forEach(f=>{
     const s=fundState(f.id);const dep=D.fundTx.filter(t=>t.fund===f.id&&t.type==="deposit"&&ymOf(t.date)===ym).reduce((a,t)=>a+(+t.amount||0),0);
     const tg=+f.target||0;
-    h+='<div class="group" style="margin-bottom:10px"><button class="row" type="button" data-act="fund" data-id="'+f.id+'"><span class="ic" style="background:'+f.color+'">'+esc(ini(f.name))+'</span><div class="k"><b>'+esc(f.name)+'</b><small>'+(dep?'أودعت '+fmt(dep)+' هذا الشهر · ':'')+(f.zakat?'زكاة محجوزة '+fmt2(z.reach?s.reserve:0):'بدون زكاة')+(f.zakat&&s.next?' · الحول '+dLabel(s.next):'')+'</small>'+(tg?'<div class="prog"><i style="width:'+Math.min(100,s.bal/tg*100)+'%;background:'+f.color+'"></i></div><small>'+Math.min(100,Math.round(s.bal/tg*100))+'٪ من الهدف '+fmt(tg)+'</small>':'')+'</div><div class="v n">'+fmt(s.bal)+'</div><span class="chev">‹</span></button></div>';
+    h+='<div class="group" style="margin-bottom:10px"><button class="row" type="button" data-act="fund" data-id="'+f.id+'"><span class="ic" style="background:'+f.color+'">'+esc(ini(f.name))+'</span><div class="k"><b>'+esc(f.name)+'</b><small>'+(dep?'أودعت '+fmt(dep)+' هذا الشهر · ':'')+(f.zakat?'زكاة متبقية '+fmt2(z.reach?s.reserve:0):'بدون زكاة')+(f.zakat&&s.next?' · الحول '+dLabel(s.next):'')+'</small>'+(tg?'<div class="prog"><i style="width:'+Math.min(100,s.bal/tg*100)+'%;background:'+f.color+'"></i></div><small>'+Math.min(100,Math.round(s.bal/tg*100))+'٪ من الهدف '+fmt(tg)+'</small>':'')+'</div><div class="v n">'+fmt(s.bal)+'</div><span class="chev">‹</span></button></div>';
   });
   h+='<div class="group"><button class="add" type="button" data-act="addfund">إضافة صندوق ادخار</button></div>';
   $("v-save").innerHTML=h;
@@ -538,9 +722,29 @@ function tripCard(t,active){
 }
 
 function renderSetup(){
-  const s=D.settings,z=s.zakat;
+  const s=D.settings,z=s.zakat,hp=s.home||{};
   let h='<div class="top"><div><h1 class="lt">الإعدادات</h1><p class="sub">كل تغيير ينحفظ فوراً على جوالك</p></div></div>';
-  h+='<div class="gh">الراتب</div><div class="group">'+nf("salary","الراتب",s.salary,10,"salary",1)+(function(){const cs=cycleList(),c=cs[cs.length-1],pd=Math.max(1,Math.min(28,+s.payday||27));const def=ymAdd(c.ym,1)+"-"+pad(pd);const v=(s.nextPay&&s.nextPay>todayISO())?s.nextPay:def;return '<div class="fld"><label for="nextPay">تاريخ نزول الراتب الجاي</label><input id="nextPay" type="date" data-set="nextPay" value="'+v+'"></div>';})()+'<div class="fld"><label for="carryOn">نقل المتبقي للراتب الجاي</label><input id="carryOn" class="sw" type="checkbox" data-set="carryOn"'+(s.carryOn?' checked':'')+'></div></div><p class="gf">الراتب يطلع تلقائياً لما تسجّل الاستلام. تاريخ النزول يُستخدم لحساب «مسموح لك تصرف يومياً». ونقل المتبقي يضيف اللي بقى من الراتب السابق على الراتب الجديد.</p>';
+  h+='<div class="gh">الراتب واحتساب التواريخ</div><div class="group">'+nf("salary","الراتب الأساسي",s.salary,10,"salary",1)+
+    '<div class="fld"><label for="startDate">تاريخ بداية الحسبة الحالية</label><input id="startDate" type="date" data-set="startDate" value="'+esc(s.startDate||cycleList()[cycleList().length-1].date)+'"></div>'+
+    '<div class="fld"><label for="nextPay">تاريخ استلام الراتب القادم (يدوي)</label><input id="nextPay" type="date" data-set="nextPay" value="'+esc(s.nextPay||"")+'"></div>'+
+    '<div class="fld"><label for="carryOn">نقل المتبقي للراتب الجاي</label><input id="carryOn" class="sw" type="checkbox" data-set="carryOn"'+(s.carryOn?' checked':'')+'></div>'+
+    '<button class="add" type="button" data-act="dates">إدارة تواريخ استلام الراتب والحسبة</button>'+
+    '</div><p class="gf">أنت من يحدد متى ينزل راتب الشهر القادم وتاريخ بداية الحسبة، ولا يتم احتسابها تلقائياً.</p>';
+  h+='<div class="gh">تخصيص الواجهة الرئيسية</div><div class="group">'+
+    '<div class="fld"><label for="hp_sav">إظهار كمية ومجموع المدخرات</label><input id="hp_sav" class="sw" type="checkbox" data-set="home.showSavings"'+(hp.showSavings!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hp_zak">إظهار الزكاة وتنبيهاتها</label><input id="hp_zak" class="sw" type="checkbox" data-set="home.showZakat"'+(hp.showZakat!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hp_sch">إظهار الادخار في دائرة الراتب</label><input id="hp_sch" class="sw" type="checkbox" data-set="home.showSavingsChart"'+(hp.showSavingsChart!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hp_day">إظهار بطاقة الصرف اليومي المسموح</label><input id="hp_day" class="sw" type="checkbox" data-set="home.showDaily"'+(hp.showDaily!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hp_obl">إظهار قائمة المصروفات الثابتة</label><input id="hp_obl" class="sw" type="checkbox" data-set="home.showObl"'+(hp.showObl!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hp_st">إظهار متوسط الصرف والمقارنة</label><input id="hp_st" class="sw" type="checkbox" data-set="home.showStats"'+(hp.showStats!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hp_cat">إظهار تفاصيل فئات المصروفات</label><input id="hp_cat" class="sw" type="checkbox" data-set="home.showCats"'+(hp.showCats!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hp_inc">إظهار قسم الدخل الإضافي</label><input id="hp_inc" class="sw" type="checkbox" data-set="home.showIncome"'+(hp.showIncome!==false?' checked':'')+'></div>'+
+    '</div><p class="gf">أخفِ المدخرات أو الزكاة من الواجهة الرئيسية للخصوصية، وستظل متاحة في صفحة الادخار.</p>';
+  h+='<div class="gh">التراجع وسجل الخطوات</div><div class="group">'+
+    '<button class="add" type="button" data-act="undo">↶ تراجع عن آخر خطوة</button>'+
+    (hist.r.length?'<button class="add" type="button" data-act="redo">↷ إعادة الخطوة المتراجع عنها</button>':'')+
+    '<button class="add" type="button" data-act="hist">عرض سجل الخطوات والتراجع خطوة بخطوة</button>'+
+    '</div>';
   const stopped=s.obligations.map((o,k)=>({o,k})).filter(x=>x.o.stopped);
   h+='<div class="gh">المصروفات الثابتة كل شهر</div><div class="group">'+s.obligations.map((o,k)=>o.stopped?'':'<div class="fld"><button class="btn sm" type="button" data-act="stopobl" data-k="'+k+'" style="padding:6px 9px;color:var(--red);background:var(--redSoft)">إيقاف</button><input class="name" type="text" data-list="obligations" data-k="'+k+'" data-f="name" value="'+esc(o.name)+'" placeholder="مثل: مصروف الولد" aria-label="الاسم"><input'+MI+'data-list="obligations" data-k="'+k+'" data-f="amount" value="'+fmtIn(o.amount)+'" placeholder="0" aria-label="المبلغ"></div>').join("")+'<button class="add" type="button" data-act="addobl">إضافة مصروف ثابت</button></div>'+(stopped.length?'<div class="gh">مصروفات ثابتة متوقفة</div><div class="group">'+stopped.map(x=>'<div class="row"><div class="k">'+esc(x.o.name||"بدون اسم")+'<small>كان <span class="n">'+fmt(x.o.amount)+'</span> · توقف '+dLabel(x.o.stopped)+'</small></div><button class="btn sm" type="button" data-act="startobl" data-k="'+x.k+'">تشغيل</button><button class="del" type="button" data-act="delobl" data-k="'+x.k+'" aria-label="حذف نهائي">−</button></div>').join("")+'</div><p class="gf">المتوقف ما ينخصم من رواتبك الجاية، ويبقى سجله في الرواتب السابقة والتقرير السنوي.</p>':'')+'<p class="gf">المجموع: <span class="n" id="oblTot">'+fmt(oblTotal())+'</span> ريال شهرياً. أي مبلغ ينصرف كل شهر بنفس القيمة: الكهرباء، المياه، الإنترنت، الجوال، مصروف الولد، مصروف الزوجة، الأقساط.</p>';
   h+='<div class="gh">فئات المصروفات</div><div class="group"><div class="fld"><label for="limitsOn">حد شهري للفئات</label><input id="limitsOn" class="sw" type="checkbox" data-set="limitsOn"'+(s.limitsOn?' checked':'')+'></div>'+D.categories.map(c=>'<button class="row" type="button" data-act="cat" data-id="'+c.id+'"><span class="ic" style="background:'+c.color+'">'+esc(ini(c.name))+'</span><div class="k">'+esc(c.name)+((c.subs.length||(s.limitsOn&&+c.limit))?'<small>'+esc(c.subs.join("، "))+(s.limitsOn&&+c.limit?(c.subs.length?' · ':'')+'الحد '+fmt(c.limit):'')+'</small>':'')+'</div><span class="chev">‹</span></button>').join("")+'<button class="add" type="button" data-act="addcat">إضافة فئة</button></div>'+(s.limitsOn?'<p class="gf">افتح أي فئة واكتب حدها الشهري. الفئات اللي لها حد تطلع في الرئيسية مع نسبة الصرف.</p>':'<p class="gf">فعّل «حد شهري للفئات» إذا تبي تحدد سقف لكل فئة وتشوف نسبة صرفك في الرئيسية.</p>');
@@ -704,7 +908,7 @@ function fundSheet(f){
     '<p class="gf">إذا زكّيته: يبدأ الحول من تاريخ آخر زكاة. إذا ما زكّيته: يبدأ من تاريخ ما صار عندك، وإذا مرّت سنة أو أكثر تطلع لك الزكاة المستحقة مباشرة.</p>';
   if(!isNew){
     const s=fundState(f.id);
-    h+='<div class="gh">الحركات</div><div class="group">'+fundEvents(f.id).slice().reverse().map(t=>'<div class="row"><div class="k">'+({opening:"رصيد افتتاحي",deposit:"إيداع",withdraw:"سحب",zakat:"زكاة مدفوعة"}[t.type])+'<small>'+dLabel(t.date)+(t.note?' · '+esc(t.note):'')+'</small>'+(t.type==="deposit"&&!t.fromIncome?'<button type="button" data-src="'+t.id+'" class="pill '+(t.src==="other"?'b':'g')+'" style="border:0;cursor:pointer;margin-top:3px">'+(t.src==="other"?'خارج الراتب':'من الراتب')+' · تغيير</button>':'')+'</div><div class="v n" style="color:'+(t.type==="deposit"||t.type==="opening"?'var(--green)':'var(--red)')+'">'+(t.type==="deposit"||t.type==="opening"?'+':'−')+fmt2(t.amount)+'</div>'+((t.type==="deposit"||t.type==="withdraw")&&!t.fromExpense&&!t.fromIncome?'<button class="del" type="button" data-deltx="'+t.id+'" aria-label="حذف الحركة">−</button>':'')+'</div>').join("")+'</div>';
+    h+='<div class="gh">الحركات</div><div class="group">'+fundEvents(f.id).slice().reverse().map(t=>'<div class="row"><div class="k">'+({opening:"رصيد افتتاحي",deposit:"إيداع",withdraw:"سحب",zakat:"زكاة مدفوعة"}[t.type])+'<small>'+dLabel(t.date)+(t.note?' · '+esc(t.note):'')+'</small>'+(t.type==="deposit"&&!t.fromIncome?'<button type="button" data-src="'+t.id+'" class="pill '+(t.src==="other"?'b':'g')+'" style="border:0;cursor:pointer;margin-top:3px">'+(t.src==="other"?'خارج الراتب':'من الراتب')+' · تغيير</button>':'')+'</div><div class="v n" style="color:'+(t.type==="deposit"||t.type==="opening"?'var(--green)':'var(--red)')+'">'+(t.type==="deposit"||t.type==="opening"?'+':'−')+fmt2(t.amount)+'</div>'+((t.type==="deposit"||t.type==="withdraw"||t.type==="zakat")&&!t.fromExpense&&!t.fromIncome?'<button class="del" type="button" data-deltx="'+t.id+'" aria-label="حذف الحركة">−</button>':'')+'</div>').join("")+'</div>';
     if(f.zakat&&s.lots.length)h+='<div class="gh">الإيداعات وحولها</div><div class="group">'+s.lots.map(l=>'<div class="row"><div class="k"><span class="n">'+fmt2(l.amt)+'</span><small>من '+dLabel(l.date)+'</small></div><div class="v">'+(addYear(l.date)<=todayISO()?'<span class="pill r">حال الحول</span>':'<span class="pill g">'+dLabel(addYear(l.date))+'</span>')+'</div></div>').join("")+'</div>';
     h+='<div class="btns" style="margin-top:14px"><button class="btn g" type="button" data-x="fdep">إيداع</button><button class="btn" type="button" data-x="fwd">سحب</button></div>';
     h+=delBox("حذف الصندوق وكل حركاته");
@@ -729,37 +933,247 @@ function fundSheet(f){
   });
 }
 
+function removeCycleById(cid){
+  const rem=D.cycles.filter(x=>x.id!==cid);
+  if(!rem.length){D.oblPaid.forEach(x=>{if(x.cy===cid)x.cy="virtual";});}
+  else{const prev=rem[rem.length-1];D.oblPaid.forEach(x=>{if(x.cy===cid)x.cy=prev.id;});}
+  D.cycles=rem;homeIdx=null;spendIdx=null;
+}
+
 function salarySheet(cy){
   const isNew=!cy;const cs=cycleList();const last=cs[cs.length-1];
   cy=cy?clone(cy):{id:"cy_"+uid(),ym:last.virtual?last.ym:ymAdd(last.ym,1),date:todayISO(),salary:salaryFor()};
   let h=shead(isNew?"استلام الراتب":"تعديل الراتب",isNew?"تم":"حفظ");
   h+='<input class="amount money" id="s_amt" type="text" inputmode="numeric" autocomplete="off" placeholder="0" value="'+fmtIn(cy.salary)+'" aria-label="مبلغ الراتب"><div style="text-align:center;color:var(--ink2);margin-top:-4px">ريال</div>';
-  h+='<div class="group" style="margin-top:12px"><div class="fld"><label for="s_ym">راتب شهر</label><input id="s_ym" type="month" value="'+cy.ym+'" style="font:inherit;border:0;background:none;color:var(--ink);direction:ltr"></div><div class="fld"><label for="s_date">تاريخ النزول</label><input id="s_date" type="date" value="'+cy.date+'"></div><div class="fld"><label for="s_keep">اجعله الراتب الافتراضي</label><input id="s_keep" class="sw" type="checkbox"'+(isNew?' checked':'')+'></div></div>';
-  h+='<p class="gf">الحسبة الجديدة تبدأ من تاريخ النزول، وتستمر لين تسجّل الراتب اللي بعده.</p><p class="msg" id="s_msg" style="color:var(--red)"></p>';
-  if(!isNew)h+=delBox("حذف هذا الراتب");
+  h+='<div class="group" style="margin-top:12px"><div class="fld"><label for="s_ym">راتب شهر</label><input id="s_ym" type="month" value="'+cy.ym+'" style="font:inherit;border:0;background:none;color:var(--ink);direction:ltr"></div>'+
+    '<div class="fld"><label for="s_date">تاريخ استلام هذا الراتب</label><input id="s_date" type="date" value="'+cy.date+'"></div>'+
+    '<div class="fld"><label for="s_next">موعد استلام الراتب القادم (تحدده أنت)</label><input id="s_next" type="date" value="'+esc(D.settings.nextPay||"")+'"></div>'+
+    '<div class="fld"><label for="s_keep">اجعله الراتب الافتراضي</label><input id="s_keep" class="sw" type="checkbox"'+(isNew?' checked':'')+'></div></div>';
+  h+='<p class="gf">الحسبة الجديدة تبدأ من تاريخ استلام هذا الراتب، وموعد الراتب القادم تحدده أنت يدوياً (ولن يتم احتسابه تلقائياً).</p><p class="msg" id="s_msg" style="color:var(--red)"></p>';
+  if(!isNew)h+=delBox("إلغاء وحذف استلام هذا الراتب");
   openSheet(h,c=>{c.addEventListener("click",ev=>{const t=ev.target.closest("button");if(!t)return;
     if(t.dataset.x==="close"){closeSheet();return;}
     if(t.dataset.x==="save"){const a=num(c.querySelector("#s_amt"));if(!(a>0)){c.querySelector("#s_msg").textContent="اكتب مبلغ الراتب.";return;}
       cy.salary=a;cy.ym=c.querySelector("#s_ym").value||cy.ym;cy.date=c.querySelector("#s_date").value||todayISO();
       if(D.cycles.some(x=>x.id!==cy.id&&x.ym===cy.ym)){c.querySelector("#s_msg").textContent="راتب "+ymLabel(cy.ym)+" مسجّل من قبل.";return;}
       if(c.querySelector("#s_keep").checked)D.settings.salary=a;
-      if(D.settings.nextPay&&D.settings.nextPay<=cy.date){D.settings.payday=+D.settings.nextPay.slice(8,10)||27;D.settings.nextPay="";}
+      D.settings.nextPay=c.querySelector("#s_next").value||"";
       const first=!D.cycles.length;
       const i=D.cycles.findIndex(x=>x.id===cy.id);if(i>=0)D.cycles[i]=cy;else D.cycles.push(cy);
       if(first)D.oblPaid.forEach(x=>{if(x.cy==="virtual")x.cy=cy.id;});
       homeIdx=null;spendIdx=null;closeSheet();commit();}
-  });armDelete(c,()=>{D.cycles=D.cycles.filter(x=>x.id!==cy.id);D.oblPaid=D.oblPaid.filter(x=>x.cy!==cy.id);homeIdx=null;spendIdx=null;closeSheet();commit();});});
+  });armDelete(c,()=>{removeCycleById(cy.id);closeSheet();commit();});});
 }
+
+function dateConfigSheet(){
+  const cs=cycleList();const idx=(homeIdx===null||homeIdx>=cs.length)?curIdx(cs):homeIdx;const cur=cs[idx];
+  let h=shead("تحديد التواريخ واستلام الراتب","حفظ");
+  h+='<div class="gh">الحسبة الحالية ('+(cur.virtual?"قبل تسجيل استلام الراتب":"راتب مسجّل")+')</div><div class="group">'+
+    '<div class="fld"><label for="dc_ym">شهر الحسبة الحالية</label><input id="dc_ym" type="month" value="'+cur.ym+'" style="font:inherit;border:0;background:none;color:var(--ink);direction:ltr"></div>'+
+    '<div class="fld"><label for="dc_start">تاريخ بداية الحسبة / الاستلام</label><input id="dc_start" type="date" value="'+cur.date+'"></div>'+
+    '</div><p class="gf">هذا التاريخ هو اليوم الذي تبدأ منه حسبة مصروفات ومتوسط صرف هذا الشهر.</p>';
+  h+='<div class="gh">موعد استلام راتب الشهر القادم (يدوياً)</div><div class="group">'+
+    '<div class="fld"><label for="dc_next">تاريخ استلام الراتب القادم</label><input id="dc_next" type="date" value="'+esc(D.settings.nextPay||"")+'"></div>'+
+    '<button class="add" type="button" data-x="clrnext" style="color:var(--red)">مسح تاريخ الراتب القادم (عدم تحديد موعد)</button>'+
+    '</div><p class="gf" id="dc_info"></p>';
+  if(!cur.virtual){
+    h+='<div class="gh">إلغاء استلام الراتب</div><div class="group"><button class="add" type="button" data-x="undocy" style="color:var(--red)">إلغاء استلام راتب شهر '+ymLabel(cur.ym)+' (الرجوع للخطوة السابقة)</button></div>';
+  }
+  openSheet(h,c=>{
+    const upd=()=>{
+      const np=c.querySelector("#dc_next").value,t=todayISO();
+      const el=c.querySelector("#dc_info");
+      if(np&&np>t)el.textContent="باقي "+daysBetween(t,np)+" يوم من اليوم ("+dLabel(t)+") حتى استلام الراتب القادم ("+dLabel(np)+").";
+      else if(np)el.textContent="التاريخ المحدد ("+dLabel(np)+") قد مضى أو يوافق اليوم.";
+      else el.textContent="لم يتم تحديد تاريخ للراتب القادم (لن يحسب التطبيق تاريخاً تلقائياً).";
+    };
+    upd();
+    c.addEventListener("input",upd);
+    c.addEventListener("change",upd);
+    c.addEventListener("click",ev=>{
+      const b=ev.target.closest("button");if(!b)return;
+      if(b.dataset.x==="close"){closeSheet();return;}
+      if(b.dataset.x==="clrnext"){c.querySelector("#dc_next").value="";upd();return;}
+      if(b.dataset.x==="undocy"){removeCycleById(cur.id);closeSheet();commit("إلغاء استلام راتب شهر "+ymLabel(cur.ym));return;}
+      if(b.dataset.x==="save"){
+        const ym=c.querySelector("#dc_ym").value||cur.ym;
+        const sd=c.querySelector("#dc_start").value||cur.date;
+        const np=c.querySelector("#dc_next").value||"";
+        if(cur.virtual){
+          D.settings.startYm=ym;
+          D.settings.startDate=sd;
+        }else{
+          const cy=D.cycles.find(x=>x.id===cur.id);
+          if(cy){cy.ym=ym;cy.date=sd;}
+        }
+        D.settings.nextPay=np;
+        closeSheet();commit("تحديد تواريخ الحسبة والراتب");
+      }
+    });
+  });
+}
+
+function historySheet(){
+  const renderContent=()=>{
+    const st=dataSteps();
+    const canUndo=hist.u.length>0||st.length>0,canRedo=hist.r.length>0;
+    let h='<div class="shead"><button type="button" data-x="close">إغلاق</button><h2>التراجع وسجل الخطوات</h2><span></span></div>';
+    h+='<div class="btns" style="margin-bottom:12px">'+
+      '<button class="btn g" type="button" data-x="undo"'+(canUndo?'':' disabled style="opacity:.4"')+'>↶ تراجع خطوة للخلف</button>'+
+      '<button class="btn" type="button" data-x="redo"'+(canRedo?'':' disabled style="opacity:.4"')+'>↷ إعادة خطوة</button>'+
+      '</div>';
+    if(undoBanner)h+='<div class="alert g" style="background:var(--greenSoft);color:var(--green);margin:0 0 12px"><b>'+esc(undoBanner)+'</b></div>';
+    if(hist.u.length){
+      h+='<div class="gh">خطوات التعديل الأخيرة (اضغط تراجع خطوة للرجوع بالترتيب)</div><div class="group">'+
+        hist.u.slice().reverse().slice(0,15).map((u,i)=>'<div class="row"><span class="pill b">'+(i===0?'الأحدث':(i+1))+'</span><div class="k">'+esc(u.label)+'</div>'+(i===0?'<button class="btn sm r" type="button" data-x="undo" style="background:var(--redSoft)">تراجع</button>':'')+'</div>').join("")+'</div>';
+    }
+    h+='<div class="gh">كل العمليات المسجلة في بياناتك (من الأحدث للأقدم)</div>';
+    if(!st.length){
+      h+='<div class="group"><div class="empty">لا توجد عمليات مسجلة حالياً.</div></div>';
+    }else{
+      h+='<p class="gf" style="margin-bottom:8px">يمكنك التراجع عن أي عملية مباشرة (مثل استلام الراتب أو دفع التزام أو مصروف) أو الضغط على «تراجع خطوة للخلف» بالأعلى للرجوع خطوة بخطوة حتى تتوقف.</p>';
+      h+='<div class="group">'+st.slice(0,40).map(s=>'<div class="row"><i class="dot" style="background:'+s.col+'"></i><div class="k"><b>'+esc(s.title)+'</b><small>'+esc(s.sub)+'</small></div><div class="v n">'+esc(s.amt)+'</div><button class="btn sm r" type="button" data-undokind="'+s.kind+'" data-undoid="'+s.id+'" style="background:var(--redSoft)">تراجع</button></div>').join("")+'</div>';
+    }
+    return h;
+  };
+  const mount=c=>{
+    c.addEventListener("click",ev=>{
+      const b=ev.target.closest("button");if(!b)return;
+      if(b.dataset.x==="close"){closeSheet();return;}
+      if(b.dataset.x==="undo"){undoOne();c.innerHTML='<div class="grab"></div>'+renderContent();return;}
+      if(b.dataset.x==="redo"){redoOne();c.innerHTML='<div class="grab"></div>'+renderContent();return;}
+      if(b.dataset.undokind){
+        const st=dataSteps().find(x=>x.kind===b.dataset.undokind&&x.id===b.dataset.undoid);
+        if(st){
+          hist.r.push({ts:Date.now(),label:st.title+(st.amt?" ("+st.amt+")":""),snap:JSON.stringify(D)});
+          st.undo();
+          save(true);saveHist();
+          undoBanner="تم التراجع عن: "+st.title;
+          renderAll();
+          c.innerHTML='<div class="grab"></div>'+renderContent();
+        }
+      }
+    });
+  };
+  openSheet(renderContent(),mount);
+}
+
+function homeCustSheet(){
+  const hp=Object.assign({showSavings:true,showZakat:true,showSavingsChart:true,showDaily:true,showObl:true,showStats:true,showCats:true,showIncome:true},D.settings.home||{});
+  let h=shead("تخصيص الواجهة الرئيسية","تم");
+  h+='<p class="gf" style="margin-bottom:10px">اختر ما يظهر أو يختفي في الواجهة الرئيسية (إخفاء المدخرات أو الزكاة لا يؤثر على حساباتها داخل قسم الادخار):</p>';
+  h+='<div class="group">'+
+    '<div class="fld"><label for="hc_sav">إظهار كمية ومجموع المدخرات</label><input id="hc_sav" class="sw" type="checkbox" data-hk="showSavings"'+(hp.showSavings!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hc_zak">إظهار الزكاة المحجوزة وتنبيهاتها</label><input id="hc_zak" class="sw" type="checkbox" data-hk="showZakat"'+(hp.showZakat!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hc_sch">إظهار الادخار في دائرة توزيع الراتب</label><input id="hc_sch" class="sw" type="checkbox" data-hk="showSavingsChart"'+(hp.showSavingsChart!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hc_day">إظهار بطاقة «مسموح لك تصرف يومياً»</label><input id="hc_day" class="sw" type="checkbox" data-hk="showDaily"'+(hp.showDaily!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hc_obl">إظهار قائمة المصروفات الثابتة</label><input id="hc_obl" class="sw" type="checkbox" data-hk="showObl"'+(hp.showObl!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hc_st">إظهار متوسط الصرف ومقارنة الراتب</label><input id="hc_st" class="sw" type="checkbox" data-hk="showStats"'+(hp.showStats!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hc_cat">إظهار تفاصيل فئات المصروفات</label><input id="hc_cat" class="sw" type="checkbox" data-hk="showCats"'+(hp.showCats!==false?' checked':'')+'></div>'+
+    '<div class="fld"><label for="hc_inc">إظهار قسم الدخل الإضافي</label><input id="hc_inc" class="sw" type="checkbox" data-hk="showIncome"'+(hp.showIncome!==false?' checked':'')+'></div>'+
+    '</div>';
+  openSheet(h,c=>{
+    c.addEventListener("change",ev=>{
+      const t=ev.target;
+      if(t.dataset.hk){
+        if(!D.settings.home)D.settings.home={};
+        D.settings.home[t.dataset.hk]=t.checked;
+        save();renderAll();
+      }
+    });
+    c.addEventListener("click",ev=>{
+      const b=ev.target.closest("button");if(!b)return;
+      if(b.dataset.x==="close"||b.dataset.x==="save")closeSheet();
+    });
+  });
+}
+
 function zakatSheet(){
   const z=zakatSummary();
-  let h=shead("دفع الزكاة","تأكيد");
-  h+='<div class="hero"><div class="cap">الزكاة المستحقة الآن</div><div><span class="big n" style="color:var(--gold)">'+fmt2(z.due)+'</span><span class="cur">ريال</span></div></div>';
-  h+='<div class="gh">من كل صندوق</div><div class="group">'+z.st.filter(x=>x.s.due>0.004).map(x=>'<div class="row"><i class="dot" style="background:'+x.f.color+'"></i><div class="k">'+esc(x.f.name)+'<small>على مبلغ '+fmt2(x.s.dueBase)+' حال عليه الحول</small></div><div class="v n">'+fmt2(x.s.due)+'</div></div>').join("")+'</div>';
-  h+='<div class="group" style="margin-top:12px"><div class="fld"><label for="zd">تاريخ الدفع</label><input id="zd" type="date" value="'+todayISO()+'"></div></div><p class="gf">بعد التأكيد يُخصم المبلغ من كل صندوق، ويبدأ حول جديد لهذه المبالغ من تاريخ الدفع.</p>';
-  openSheet(h,c=>{c.addEventListener("click",ev=>{const t=ev.target.closest("button");if(!t)return;
-    if(t.dataset.x==="close"){closeSheet();return;}
-    if(t.dataset.x==="save"){const d=c.querySelector("#zd").value||todayISO();z.st.forEach(x=>{if(x.s.due>0.004)D.fundTx.push({id:uid(),fund:x.f.id,type:"zakat",date:d,amount:Math.round(x.s.due*100)/100,note:"زكاة"});});closeSheet();commit();}
-  });});
+  const zf=D.funds.filter(f=>f.zakat);
+  const allFunds=zf.length?zf:D.funds;
+  let selFund=(allFunds[0]||{}).id||"";
+  let mode="fund";
+  const defAmt=z.due>0.5?Math.round(z.due):0;
+  let h=shead("خصم / دفع الزكاة","تأكيد الخصم");
+  h+='<input class="amount money" id="z_amt"'+MI+'placeholder="0" value="'+fmtIn(defAmt)+'" aria-label="مبلغ الزكاة المدفوع"><div style="text-align:center;color:var(--ink2);margin-top:-4px">ريال (اكتب المبلغ الذي أعطيته للمستحق)</div>';
+  h+='<div class="chips" style="margin-top:10px;justify-content:center">'+
+    (z.due>0.01?'<button class="chip" type="button" data-zfill="'+Math.round(z.due)+'">كامل المستحقة ('+fmt2(z.due)+')</button>':'')+
+    (z.reserve>0.01?'<button class="chip" type="button" data-zfill="'+Math.round(z.reserve)+'">كامل المتبقية ('+fmt2(z.reserve)+')</button>':'')+
+    '</div>';
+  h+='<div class="group" style="margin-top:12px">'+
+    row("الزكاة المتبقية حالياً",fmt2(z.reserve),"var(--gold)")+
+    (z.paidPart>0?row("مخصوم سابقاً للمستحقين","−"+fmt2(z.paidPart),"var(--green)"):"")+
+    row("الزكاة المتبقية بعد هذا الخصم",'<span id="z_after">'+fmt2(Math.max(0,z.reserve-defAmt))+'</span>',"var(--green)")+
+    '</div>';
+  if(allFunds.length>1){
+    h+='<div class="gh">حساب الزكاة على صندوق</div><div class="chips">'+allFunds.map(f=>'<button class="chip" type="button" data-zfd="'+f.id+'" aria-pressed="'+(f.id===selFund)+'"><i class="dot" style="background:'+f.color+'"></i>'+esc(f.name)+'</button>').join("")+'</div>';
+  }
+  h+='<div class="gh">من أين يُخصم المبلغ؟</div><div class="seg">'+
+    '<button type="button" data-zmd="fund" aria-pressed="true">من صندوق الادخار</button>'+
+    '<button type="button" data-zmd="salary" aria-pressed="false">من راتب الشهر</button>'+
+    '<button type="button" data-zmd="only" aria-pressed="false">من الزكاة فقط</button>'+
+    '</div><p class="gf" id="z_md_desc" style="margin-top:0">ينخصم المبلغ من الزكاة المتبقية وينخصم أيضاً من رصيد صندوق الادخار.</p>';
+  h+='<div class="group" style="margin-top:10px">'+
+    '<div class="fld"><input class="name" id="z_note" type="text" placeholder="بيان أو ملاحظة، مثل: مستحق زكاة (اختياري)" value="إعطاء مستحق زكاة" aria-label="ملاحظة"></div>'+
+    '<div class="fld"><label for="zd">تاريخ الدفع</label><input id="zd" type="date" value="'+todayISO()+'"></div>'+
+    '<div class="fld"><label for="z_reset">إتمام حول كامل وتجديد التاريخ</label><input id="z_reset" class="sw" type="checkbox"></div>'+
+    '</div><p class="gf">اترك «إتمام حول كامل» مغلقاً إذا كنت تدفع جزءاً من الزكاة لمستحق، لكي يُخصم المبلغ من الزكاة المتبقية دون تصفير الحول.</p>';
+  h+='<p class="msg" id="z_msg" style="color:var(--red)"></p>';
+  if(z.payments.length){
+    h+='<div class="gh">دفعات الزكاة السابقة</div><div class="group">'+z.payments.map(t=>{
+      const f=fundById(t.fund);
+      return '<div class="row"><div class="k">'+esc(t.note||"زكاة")+'<small>'+dLabel(t.date)+(f?' · '+esc(f.name):'')+'</small></div><div class="v n" style="color:var(--gold)">−'+fmt2(t.amount)+'</div><button class="del" type="button" data-delzk="'+t.id+'" aria-label="حذف">−</button></div>';
+    }).join("")+'</div>';
+  }
+  openSheet(h,c=>{
+    const upd=()=>{
+      const a=num(c.querySelector("#z_amt"));
+      const af=c.querySelector("#z_after");
+      if(af)af.textContent=fmt2(Math.max(0,z.reserve-a));
+    };
+    c.addEventListener("input",upd);
+    c.addEventListener("click",ev=>{
+      const t=ev.target.closest("button");if(!t)return;
+      if(t.dataset.zfill!==undefined){c.querySelector("#z_amt").value=fmtIn(+t.dataset.zfill);upd();return;}
+      if(t.dataset.zfd){selFund=t.dataset.zfd;c.querySelectorAll("[data-zfd]").forEach(b=>b.setAttribute("aria-pressed",b===t));return;}
+      if(t.dataset.zmd){
+        mode=t.dataset.zmd;
+        c.querySelectorAll("[data-zmd]").forEach(b=>b.setAttribute("aria-pressed",b===t));
+        const desc={fund:"ينخصم المبلغ من الزكاة المتبقية وينخصم أيضاً من رصيد صندوق الادخار.",salary:"ينخصم المبلغ من الزكاة المتبقية ومن المتبقي من راتب الشهر الحالي (دون المساس برصيد الصندوق).",only:"ينخصم المبلغ من الزكاة المتبقية فقط (إذا دفعته من خارج التطبيق)."};
+        c.querySelector("#z_md_desc").textContent=desc[mode]||"";
+        return;
+      }
+      if(t.dataset.delzk){
+        D.fundTx=D.fundTx.filter(x=>x.id!==t.dataset.delzk);
+        closeSheet();commit("حذف دفعة زكاة");return;
+      }
+      if(t.dataset.x==="close"){closeSheet();return;}
+      if(t.dataset.x==="save"){
+        const a=num(c.querySelector("#z_amt"));
+        if(!(a>0)){c.querySelector("#z_msg").textContent="اكتب المبلغ الذي أعطيته للمستحق.";c.querySelector("#z_amt").focus();return;}
+        if(!selFund&&D.funds.length)selFund=D.funds[0].id;
+        if(!selFund){c.querySelector("#z_msg").textContent="أضف صندوق ادخار أولاً.";return;}
+        const d=c.querySelector("#zd").value||todayISO();
+        const note=c.querySelector("#z_note").value.trim()||"زكاة لمستحق";
+        const resetHawl=c.querySelector("#z_reset").checked;
+        D.fundTx.push({
+          id:uid(),
+          fund:selFund,
+          type:"zakat",
+          date:d,
+          amount:a,
+          note,
+          partial:!resetHawl,
+          resetHawl,
+          deductFund:mode==="fund",
+          src:mode==="salary"?"salary":(mode==="only"?"external":"fund")
+        });
+        closeSheet();commit("خصم زكاة ("+fmt2(a)+" ريال)");
+      }
+    });
+    setTimeout(()=>c.querySelector("#z_amt").focus(),250);
+  });
 }
 
 function tripSheet(t){
@@ -801,7 +1215,7 @@ function catSheet(cat){
 const backupText=()=>JSON.stringify({app:"edkhari",v:3,saved:new Date().toISOString(),data:D});
 const backupName=()=>"edkhari-backup-"+todayISO()+".json";
 function bmsg(t,ok){const m=$("bkMsg");if(m){m.textContent=t;m.style.color=ok?"var(--green)":"var(--red)";}}
-function applyBackup(txt){try{const o=JSON.parse(txt);const d=o&&o.data?o.data:o;if(!d||d.v!==3||!d.settings)throw 0;D=fix(d);save();renderAll();bmsg("تم استرجاع بياناتك.",true);}catch(e){bmsg("الملف أو النص غير صالح.",false);}}
+function applyBackup(txt){try{const o=JSON.parse(txt);const d=o&&o.data?o.data:o;if(!d||d.v!==3||!d.settings)throw 0;D=fix(d);hist={u:[],r:[]};saveHist();save(true);renderAll();bmsg("تم استرجاع بياناتك. يمكنك الآن التراجع خطوة بخطوة من الرئيسية.",true);}catch(e){bmsg("الملف أو النص غير صالح.",false);}}
 async function doExport(){const txt=backupText(),name=backupName();
   try{const file=new File([txt],name,{type:"application/json"});if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:"نسخة احتياطية - ادخاري"});bmsg("اختر «حفظ في الملفات» لو ما اخترته.",true);return;}}catch(e){if(e&&e.name==="AbortError")return;}
   try{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([txt],{type:"application/json"}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},2000);bmsg("تم حفظ الملف "+name,true);}catch(e){bmsg("ما قدرت أحفظ الملف، استخدم «نسخ البيانات كنص».",false);}}
@@ -814,6 +1228,26 @@ document.addEventListener("click",ev=>{
     case "hm":homeIdx=Math.max(0,Math.min(cycleList().length-1,homeIdx+(+k)));renderHome();break;
     case "sm":spendIdx=Math.max(0,Math.min(cycleList().length-1,spendIdx+(+k)));renderSpend();break;
     case "salary":salarySheet();break;
+    case "undocycle":{const cy=D.cycles.find(x=>x.id===id);if(cy){removeCycleById(id);undoBanner="تم إلغاء استلام راتب شهر "+ymLabel(cy.ym);commit("إلغاء استلام راتب شهر "+ymLabel(cy.ym));}break;}
+    case "undo":undoOne();break;
+    case "redo":redoOne();break;
+    case "clearbanner":undoBanner="";renderHome();break;
+    case "hist":historySheet();break;
+    case "dates":dateConfigSheet();break;
+    case "incprev":{
+      const ds=[];
+      D.expenses.forEach(e=>{if(e.date)ds.push(e.date);});
+      D.fundTx.forEach(t=>{if(t.type!=="opening"&&t.date&&t.date>"0000-00-00")ds.push(t.date);});
+      ds.sort();
+      if(ds[0]){
+        if(D.cycles.length){D.cycles.sort((a,b)=>a.date<b.date?-1:1);D.cycles[0].date=ds[0];D.cycles[0].ym=ds[0].slice(0,7);}
+        else{D.settings.startDate=ds[0];D.settings.startYm=ds[0].slice(0,7);}
+        commit("ضم العمليات السابقة للحسبة الحالية");
+      }
+      break;
+    }
+    case "custhome":homeCustSheet();break;
+    case "delzakat":D.fundTx=D.fundTx.filter(x=>x.id!==id);commit("حذف دفعة زكاة");break;
     case "spseg":spendSeg=k;renderSpend();break;
     case "yr":repYear+=(+k);renderSpend();break;
     case "togobl":uiSet("oblOpen",!uiGet("oblOpen",true));renderHome();break;
